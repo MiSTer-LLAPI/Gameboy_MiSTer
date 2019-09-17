@@ -120,7 +120,6 @@ module emu
 );
 
 assign ADC_BUS  = 'Z;
-assign USER_OUT = '1;
 assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = 0; 
 assign VGA_F1 = 0;
 
@@ -175,7 +174,9 @@ localparam CONF_STR5 = {
 	"O34,Aspect ratio,4:3,10:9,16:9;",
 	"O78,Stereo mix,none,25%,50%,100%;",
 	"-;",
-   "O2,Boot,Normal,Fast;",
+	"O2,Boot,Normal,Fast;",
+	"-;",
+	"OU,Serial Mode,None,LLAPI;",
 	"-;",
 	"R0,Reset;",
 	"J1,A,B,Select,Start;",
@@ -208,7 +209,6 @@ wire [15:0] ioctl_dout;
 reg         ioctl_wait;
 
 wire [15:0] joystick_0, joystick_1;
-wire [15:0] joystick = joystick_0 | joystick_1;
 wire [7:0]  filetype;
 
 reg  [31:0] sd_lba;
@@ -309,6 +309,84 @@ always @(posedge clk_sys) begin
 		if(dn_write) cart_ready <= 1;
 	end
 end
+
+//////////////////   LLAPI   ///////////////////
+
+wire [31:0] llapi_buttons, llapi_buttons2;
+wire [71:0] llapi_analog, llapi_analog2;
+wire [7:0]  llapi_type, llapi_type2;
+wire llapi_en, llapi_en2;
+
+wire llapi_select = status[30];
+
+wire llapi_latch_o, llapi_latch_o2, llapi_data_o, llapi_data_o2;
+
+always_comb begin
+	USER_OUT = 6'b111111;
+	if (llapi_select) begin
+		USER_OUT[0] = llapi_latch_o;
+		USER_OUT[1] = llapi_data_o;
+		USER_OUT[2] = ~(llapi_select & ~OSD_STATUS);
+		USER_OUT[4] = llapi_latch_o2;
+		USER_OUT[5] = llapi_data_o2;
+	end
+end
+
+LLAPI llapi
+(
+	.CLK_50M(CLK_50M),
+	.LLAPI_SYNC(video_vs),
+	.IO_LATCH_IN(USER_IN[0]),
+	.IO_LATCH_OUT(llapi_latch_o),
+	.IO_DATA_IN(USER_IN[1]),
+	.IO_DATA_OUT(llapi_data_o),
+	.ENABLE(llapi_select & ~OSD_STATUS),
+	.LLAPI_BUTTONS(llapi_buttons),
+	.LLAPI_ANALOG(llapi_analog),
+	.LLAPI_TYPE(llapi_type),
+	.LLAPI_EN(llapi_en)
+);
+
+LLAPI llapi2
+(
+	.CLK_50M(CLK_50M),
+	.LLAPI_SYNC(video_vs),
+	.IO_LATCH_IN(USER_IN[4]),
+	.IO_LATCH_OUT(llapi_latch_o2),
+	.IO_DATA_IN(USER_IN[5]),
+	.IO_DATA_OUT(llapi_data_o2),
+	.ENABLE(llapi_select & ~OSD_STATUS),
+	.LLAPI_BUTTONS(llapi_buttons2),
+	.LLAPI_ANALOG(llapi_analog2),
+	.LLAPI_TYPE(llapi_type2),
+	.LLAPI_EN(llapi_en2)
+);
+
+// Indexes:
+// 0 = D+    = P1 Latch
+// 1 = D-    = P1 Data
+// 2 = TX-   = LLAPI Enable
+// 3 = GND_d = N/C
+// 4 = RX+   = P2 Latch
+// 5 = RX-   = P2 Data
+
+//	"J1,A,B,C,D,Start,Select,Coin,ABC;"
+
+wire [15:0] joy_ll_a = { 8'd0,
+	llapi_buttons[5], llapi_buttons[4],
+	llapi_buttons[0], llapi_buttons[1],
+	llapi_buttons[27], llapi_buttons[26], llapi_buttons[25], llapi_buttons[24]
+};
+
+wire [15:0] joy_ll_b = { 8'd0,
+	llapi_buttons2[5], llapi_buttons2[4],
+	llapi_buttons2[0], llapi_buttons2[1],
+	llapi_buttons2[27], llapi_buttons2[26], llapi_buttons2[25], llapi_buttons2[24]
+};
+
+wire llapi_osd = (llapi_buttons[4] & llapi_buttons[5]) || (llapi_buttons2[4] & llapi_buttons2[5]);
+
+wire [15:0] joystick = joy_ll_a | joy_ll_b | joystick_0 | joystick_1;
 
 ///////////////////////////////////////////////////
 
