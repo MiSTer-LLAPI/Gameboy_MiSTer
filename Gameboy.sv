@@ -384,7 +384,7 @@ wire [15:0] joy_ll_b = { 8'd0,
 	llapi_buttons2[27], llapi_buttons2[26], llapi_buttons2[25], llapi_buttons2[24]
 };
 
-wire llapi_osd = (llapi_buttons[4] & llapi_buttons[5]) || (llapi_buttons2[4] & llapi_buttons2[5]);
+wire llapi_osd = (llapi_buttons[26] & llapi_buttons[5] & llapi_buttons[0]) || (llapi_buttons2[26] & llapi_buttons2[5] & llapi_buttons2[0]);
 
 wire [15:0] joystick = joy_ll_a | joy_ll_b | joystick_0 | joystick_1;
 
