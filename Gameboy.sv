@@ -134,7 +134,7 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign LED_USER  = ioctl_download | sav_pending;
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
-assign BUTTONS   = 0;
+assign BUTTONS   = llapi_osd;
 
 assign VIDEO_ARX = status[4:3] == 2'b10 ? 8'd16:
 						 status[4:3] == 2'b01 ? 8'd10:
