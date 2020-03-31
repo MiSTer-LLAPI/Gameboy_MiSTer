@@ -147,36 +147,25 @@ assign VIDEO_ARY = status[4:3] == 2'b10 ? 8'd9:
 assign AUDIO_MIX = status[8:7];
 
 `include "build_id.v" 
-localparam CONF_STR1 = {
+localparam CONF_STR = {
 	"GAMEBOY;;",
-	"-;",
-	"FS,GBCGB ,Load ROM;",
+	"FS1,GBCGB ,Load ROM;",
 	"OEF,System,Auto,Gameboy,Gameboy Color;",
 	"-;",
-	"C,Cheats;"
-};
-
-localparam CONF_STR2 = {
-	"H,Cheats enabled,Yes,No;",
+	"C,Cheats;",
+	"h0OH,Cheats enabled,Yes,No;",
 	"-;",
 	"OC,Inverted color,No,Yes;",
-	"O1,Palette,Grayscale,Custom;"
-};
-
-localparam CONF_STR3 = {
-	",GBP,Load Palette;",
+	"O1,Palette,Grayscale,Custom;",
+	"h1F2,GBP,Load Palette;",
 	"-;",
-	"OD,OSD triggered autosaves,No,Yes;"
-};
-
-localparam CONF_STR4 = {
-	"9,Load Backup RAM;"
-};
-
-localparam CONF_STR5 = {
-	"A,Save Backup RAM;",
+	"h2R9,Load Backup RAM;",
+	"h2RA,Save Backup RAM;",
+	"OD,Autosave,Off,On;",
 	"-;",
 	"O34,Aspect ratio,4:3,10:9,16:9;",
+	"OIK,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
+	"O5,Stabilize video(buffer),Off,On;",
 	"O78,Stereo mix,none,25%,50%,100%;",
 	"-;",
 	"O2,Boot,Normal,Fast;",
@@ -190,15 +179,17 @@ localparam CONF_STR5 = {
 
 ////////////////////   CLOCKS   ///////////////////
 
-wire clk_sys;
+wire clk_sys, clk_ram;
 wire pll_locked;
-		
+
+assign CLK_VIDEO = clk_ram;
+
 pll pll
 (
 	.refclk(CLK_50M),
 	.rst(0),
-	.outclk_0(clk_sys),
-	.outclk_1(CLK_VIDEO),
+	.outclk_0(clk_ram),
+	.outclk_1(clk_sys),
 	.locked(pll_locked)
 );
 
@@ -206,6 +197,7 @@ pll pll
 
 wire [31:0] status;
 wire  [1:0] buttons;
+wire        forced_scandoubler;
 wire        direct_video;
 wire [21:0] gamma_bus;
 
@@ -230,14 +222,12 @@ wire        img_mounted;
 wire        img_readonly;
 wire [63:0] img_size;
 
-wire [7:0] sav_char = sav_supported ? "R" : "+";
-
-hps_io #(.STRLEN(($size(CONF_STR1)>>3) + ($size(CONF_STR2)>>3) + ($size(CONF_STR3)>>3) + ($size(CONF_STR4)>>3) + ($size(CONF_STR5)>>3) + 4), .WIDE(1)) hps_io
+hps_io #(.STRLEN($size(CONF_STR)>>3), .WIDE(1)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
 
-	.conf_str({CONF_STR1, gg_available ? "O" : "+",CONF_STR2, status[1]?"F":"+",CONF_STR3, sav_char, CONF_STR4, sav_char, CONF_STR5}),
+	.conf_str(CONF_STR),
 
 	.ioctl_download(ioctl_download),
 	.ioctl_wr(ioctl_wr),
@@ -260,8 +250,10 @@ hps_io #(.STRLEN(($size(CONF_STR1)>>3) + ($size(CONF_STR2)>>3) + ($size(CONF_STR
 
 	.buttons(buttons),
 	.status(status),
+	.status_menumask({sav_supported,status[1],gg_available}),
 	.direct_video(direct_video),
 	.gamma_bus(gamma_bus),
+	.forced_scandoubler(forced_scandoubler),
 
 	.joystick_0(joystick_0),
 	.joystick_1(joystick_1)
@@ -270,7 +262,7 @@ hps_io #(.STRLEN(($size(CONF_STR1)>>3) + ($size(CONF_STR2)>>3) + ($size(CONF_STR
 ///////////////////////////////////////////////////
 
 wire cart_download = ioctl_download && (filetype == 8'h01 || filetype == 8'h41 || filetype == 8'h80);
-wire palette_download = ioctl_download && (filetype == 8'h07 || filetype == 8'h06 || filetype == 8'h00);
+wire palette_download = ioctl_download && (filetype == 2 || !filetype);
 wire bios_download = ioctl_download && (filetype == 8'h40);
 
 wire  [1:0] sdram_ds = cart_download ? 2'b11 : {cart_addr[0], ~cart_addr[0]};
@@ -295,7 +287,7 @@ sdram sdram (
    .sd_clk         ( SDRAM_CLK                 ),
 
     // system interface
-   .clk            ( clk_sys                   ),
+   .clk            ( clk_ram                   ),
    .sync           ( ce_cpu2x                  ),
    .init           ( ~pll_locked               ),
 
@@ -666,91 +658,84 @@ gb gb (
 
 // the lcd to vga converter
 wire [7:0] video_r, video_g, video_b;
-wire video_hs, video_vs, video_bl;
+wire video_hs, video_vs;
+wire HBlank, VBlank;
+wire ce_pix;
 
-lcd lcd (
-	 .pclk   ( clk_sys_old),
-	 .pce    ( ce_pix     ),
-	 .clk    ( clk_cpu    ),
-	 .isGBC  ( isGBC      ),
+lcd lcd
+(
+	// serial interface
+	.clk_sys( clk_sys    ),
+	.pix_wr ( lcd_clkena & ce_cpu ),
+	.data   ( lcd_data   ),
+	.mode   ( lcd_mode   ),  // used to detect begin of new lines and frames
+	.on     ( lcd_on     ),
 
-	 .tint   ( status[1]  ),
-	 .inv    ( status[12]  ),
+	.isGBC  ( isGBC      ),
 
-	 // Palettes
-	 .pal1   (palette[127:104]),
-	 .pal2   (palette[103:80]),
-	 .pal3   (palette[79:56]),
-	 .pal4   (palette[55:32]),
+	.tint   ( status[1]  ),
+	.inv    ( status[12]  ),
+	.double_buffer( status[5]),
 
-	 // serial interface
-	 .clkena ( lcd_clkena ),
-	 .data   ( lcd_data   ),
-	 .mode   ( lcd_mode   ),  // used to detect begin of new lines and frames
-	 .on     ( lcd_on     ),
-	 
-  	 .hs     ( video_hs   ),
-	 .vs     ( video_vs   ),
-	 .blank  ( video_bl   ),
-	 .r      ( video_r    ),
-	 .g      ( video_g    ),
-	 .b      ( video_b    )
+	// Palettes
+	.pal1   (palette[127:104]),
+	.pal2   (palette[103:80]),
+	.pal3   (palette[79:56]),
+	.pal4   (palette[55:32]),
+
+	.clk_vid( CLK_VIDEO  ),
+	.hs     ( video_hs   ),
+	.vs     ( video_vs   ),
+	.hbl    ( HBlank     ),
+	.vbl    ( VBlank     ),
+	.r      ( video_r    ),
+	.g      ( video_g    ),
+	.b      ( video_b    ),
+	.ce_pix ( ce_pix     )
 );
 
-assign VGA_SL = 0;
-assign CE_PIXEL = ce_o & (direct_video | !line_cnt);
-
-reg hs_o, vs_o, ce_o;
+reg hs_o, vs_o;
 always @(posedge CLK_VIDEO) begin
-	reg old_ce;
-
-	old_ce <= ce_pix2;
-
-	ce_o <= 0;
-	if(old_ce & ~ce_pix2) begin
-		ce_o <= 1;
+	if(ce_pix) begin
 		hs_o <= video_hs;
 		if(~hs_o & video_hs) vs_o <= video_vs;
 	end
 end
 
-gamma_fast gamma
-(
-	.clk_vid(CLK_VIDEO),
-	.ce_pix(ce_o),
+assign VGA_F1 = 0;
+assign VGA_SL = sl[1:0];
 
-	.gamma_bus(gamma_bus),
+wire [2:0] scale = status[20:18];
+wire [2:0] sl = scale ? scale - 1'd1 : 3'd0;
+wire       scandoubler = (scale || forced_scandoubler);
+
+video_mixer #(.LINE_LENGTH(200), .GAMMA(1)) video_mixer
+(
+	.*,
+
+	.clk_vid(CLK_VIDEO),
+	.ce_pix_out(CE_PIXEL),
+
+	.scanlines(0),
+	.hq2x(scale==1),
+	.mono(0),
 
 	.HSync(hs_o),
 	.VSync(vs_o),
-	.DE(~video_bl),
-	.RGB_in({video_r, video_g, video_b}),
-
-	.HSync_out(VGA_HS),
-	.VSync_out(VGA_VS),
-	.DE_out(VGA_DE),
-	.RGB_out({VGA_R,VGA_G,VGA_B})
+	.R(video_r),
+	.G(video_g),
+	.B(video_b)
 );
 
 //////////////////////////////// CE ////////////////////////////////////
 
-wire clk_sys_old =  clk_sys & ce_sys;
-wire ce_cpu2x = ce_pix;
-wire clk_cpu = clk_sys & ce_cpu;
-wire clk_cpu2x = clk_sys & ce_pix;
-
-reg ce_pix, ce_pix2, ce_cpu,ce_sys;
+reg ce_cpu, ce_cpu2x;
 always @(negedge clk_sys) begin
-	reg [3:0] div = 0;
-	reg [1:0] ce_pix_r;
+	reg [2:0] div = 0;
 
-	div    <= div + 1'd1;
-	ce_sys <= !div[0];
-	ce_pix <= !div[2:0];
-	ce_cpu <= !div[3:0];
-
-	ce_pix_r <= {ce_pix_r[0], ce_pix};
-	ce_pix2  <= |ce_pix_r;
+	div      <= div + 1'd1;
+	ce_cpu2x <= !div[1:0];
+	ce_cpu   <= !div[2:0];
 end
 
 ///////////////////////////// GBC BIOS /////////////////////////////////
@@ -762,14 +747,11 @@ dpram_dif #(12,8,11,16,"BootROMs/cgb_boot.mif") boot_rom_gbc (
 	.clock (clk_sys),
 	
 	.address_a (bios_addr),
-	.wren_a (),
-	.data_a (),
 	.q_a (bios_do),
 	
 	.address_b (ioctl_addr[11:1]),
 	.wren_b (ioctl_wr && bios_download),
-	.data_b (ioctl_dout),
-	.q_b ()
+	.data_b (ioctl_dout)
 );
 
 ///////////////////////////// CHEATS //////////////////////////////////
@@ -836,7 +818,7 @@ wire [16:0] cram_addr = mbc1? {2'b00,mbc1_ram_bank, cart_addr[12:0]}:
 // Up to 8kb * 16banks of Cart Ram (128kb)
 
 dpram #(16) cram_l (
-	.clock_a (clk_cpu2x),
+	.clock_a (clk_sys),
 	.address_a (cram_addr[16:1]),
 	.wren_a (cram_wr & ~cram_addr[0]),
 	.data_a (cart_di),
@@ -850,7 +832,7 @@ dpram #(16) cram_l (
 );
 
 dpram #(16) cram_h (
-	.clock_a (clk_cpu2x),
+	.clock_a (clk_sys),
 	.address_a (cram_addr[16:1]),
 	.wren_a (cram_wr & cram_addr[0]),
 	.data_a (cart_di),
@@ -939,18 +921,6 @@ always @(posedge clk_sys) begin
 			end
 		end
 	end
-end
-
-reg [1:0] line_cnt;
-always @(posedge clk_sys_old) begin
-	reg old_hs;
-	reg old_vs;
-
-	old_vs <= video_vs;
-	old_hs <= video_hs;
-
-	if(old_hs & ~video_hs) line_cnt <= line_cnt + 1'd1;
-	if(old_vs & ~video_vs) line_cnt <= 0;
 end
 
 endmodule
