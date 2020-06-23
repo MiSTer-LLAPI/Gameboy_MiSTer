@@ -52,13 +52,24 @@ module gb (
 	output [14:0] lcd_data,
 	output [1:0] lcd_mode,
 	output lcd_on,
+
+	output [5:0] joy_p54,
+	input  [5:0] joy_sgb,
 	
 	output speed,   //GBC
 	
 	input          gg_reset,
 	input          gg_en,
 	input  [128:0] gg_code,
-	output         gg_available
+	output         gg_available,
+
+	//serial port
+	input   serial_ena,
+	output sc_int_clock2,
+	input serial_clk_in,
+	output serial_clk_out,
+	input  serial_data_in,
+	output serial_data_out
 );
 
 // include cpu
@@ -76,7 +87,7 @@ wire sel_cram = cpu_addr[15:13] == 3'b101;           // 8k cart ram at $a000
 wire sel_vram = cpu_addr[15:13] == 3'b100;           // 8k video ram at $8000
 wire sel_ie   = cpu_addr == 16'hffff;                // interupt enable
 wire sel_if   = cpu_addr == 16'hff0f;                // interupt flag
-wire sel_iram = (cpu_addr[15:14] == 2'b11) && (cpu_addr[15:8] != 8'hff); // 8k internal ram at $c000
+wire sel_iram = (cpu_addr[15:14] == 2'b11) && (~&cpu_addr[13:9]); // 8k internal ram at $C000-DFFF. C000-DDFF mirrored to E000-FDFF
 wire sel_zpram = (cpu_addr[15:7] == 9'b111111111) && // 127 bytes zero pageram at $ff80
 					 (cpu_addr != 16'hffff);
 wire sel_audio = (cpu_addr[15:8] == 8'hff) &&        // audio reg ff10 - ff3f
@@ -86,7 +97,7 @@ wire sel_audio = (cpu_addr[15:8] == 8'hff) &&        // audio reg ff10 - ff3f
 wire dma_sel_rom = !dma_addr[15];                       // lower 32k are rom
 wire dma_sel_cram = dma_addr[15:13] == 3'b101;           // 8k cart ram at $a000
 wire dma_sel_vram = dma_addr[15:13] == 3'b100;           // 8k video ram at $8000
-wire dma_sel_iram = (dma_addr[15:14] == 2'b11) && (dma_addr[15:8] != 8'hff); // 8k internal ram at $c000
+wire dma_sel_iram = (dma_addr[15:8] >= 8'hC0 && dma_addr[15:8] <= 8'hF1); // 8k internal ram at $c000
 
 //CGB
 wire sel_vram_bank = (cpu_addr==16'hff4f);
@@ -118,7 +129,7 @@ wire [7:0] cpu_di =
 	   isGBC&&sel_hdma?{hdma_do}:  //hdma GBC
 	   isGBC&&sel_key1?{cpu_speed,6'h3f,prepare_switch}: //key1 cpu speed register(GBC)
 		sel_joy?joy_do:         // joystick register
-		sel_sb?8'hFF:				// serial transfer data register
+		sel_sb?sb:				// serial transfer data register
 		sel_sc?sc_r:				// serial transfer control register
 		sel_timer?timer_do:     // timer registers
 		sel_video_reg?video_do: // video registers
@@ -140,10 +151,10 @@ wire cpu_mreq_n;
 
 wire clk = clk_sys & ce;
 
-wire current_cpu_ce = cpu_speed ? ce_2x:ce;
-wire clk_cpu = clk_sys & current_cpu_ce;
+wire ce_cpu = cpu_speed ? ce_2x:ce;
+wire clk_cpu = clk_sys & ce_cpu;
 
-wire cpu_clken = !(isGBC && hdma_active) && current_cpu_ce;  //when hdma is enabled stop CPU (GBC)
+wire cpu_clken = !(isGBC && hdma_active) && ce_cpu;  //when hdma is enabled stop CPU (GBC)
 
 
 wire cpu_stop;
@@ -237,28 +248,66 @@ gbc_snd audio (
 );
 
 // --------------------------------------------------------------------
-// -----------------------serial port(dummy)---------------------------
+// -----------------------serial port()--------------------------------
 // --------------------------------------------------------------------
 
-reg [3:0] serial_counter;
-reg sc_start,sc_shiftclock;
+wire serial_irq    = serial_ena ? serial_irq_s    : serial_irq_f;
+wire [7:0] sb      = serial_ena ? sb_s            : 8'hFF;
+wire sc_start      = serial_ena ? sc_start_s      : sc_start_f;
+wire sc_shiftclock = serial_ena ? sc_shiftclock_s : sc_shiftclock_f;
 
-reg serial_irq;
-reg [8:0] serial_clk_div; //8192Hz
+// SNAC
+wire serial_irq_s;
+wire [7:0] sb_s;
+wire sc_start_s;
+wire sc_shiftclock_s;
+
+assign sc_int_clock2 = sc_shiftclock;
+
+link link (
+  .clk(clk_cpu),
+  .rst(reset),
+
+  .sel_sc(sel_sc),
+  .sel_sb(sel_sb),
+  .cpu_wr_n(cpu_wr_n),
+  .sc_start_in(cpu_do[7]),
+  .sc_int_clock_in(cpu_do[0]),
+
+  .sb_in(cpu_do),
+
+  .serial_clk_in(serial_clk_in),
+  .serial_data_in(serial_data_in),
+
+  .serial_clk_out(serial_clk_out),
+  .serial_data_out(serial_data_out),
+  .sb(sb_s),
+  .serial_irq(serial_irq_s),
+  .sc_start(sc_start_s),
+  .sc_int_clock(sc_shiftclock_s)
+
+);
+
+// Fake
+reg sc_start_f,sc_shiftclock_f;
+reg serial_irq_f;
 
 always @(posedge clk_cpu) begin
-	serial_irq <= 1'b0;
+	reg [3:0] serial_counter;
+	reg [8:0] serial_clk_div; //8192Hz
+
+	serial_irq_f <= 1'b0;
    if(reset) begin
-		  sc_start <= 1'b0;
-		  sc_shiftclock <= 1'b0;
+		  sc_start_f <= 1'b0;
+		  sc_shiftclock_f <= 1'b0;
 	end else if (sel_sc && !cpu_wr_n) begin	 //cpu write
-		sc_start <= cpu_do[7];
-		sc_shiftclock <= cpu_do[0];
+		sc_start_f <= cpu_do[7];
+		sc_shiftclock_f <= cpu_do[0];
 		if (cpu_do[7]) begin 						//enable transfer
 			serial_clk_div <= 9'h1FF;
 			serial_counter <= 4'd8;
 		end 
-	end else if (sc_start && sc_shiftclock) begin // serial transfer and serial clock enabled
+	end else if (sc_start_f && sc_shiftclock_f) begin // serial transfer and serial clock enabled
 		
 		serial_clk_div <= serial_clk_div - 9'd1;
 		
@@ -266,8 +315,8 @@ always @(posedge clk_cpu) begin
 				serial_counter <= serial_counter - 4'd1;
 		
 		if (!serial_counter) begin
-			serial_irq <= 1'b1; 	//trigger interrupt
-			sc_start <= 1'b0; 	//reset transfer state
+			serial_irq_f <= 1'b1; 	//trigger interrupt
+			sc_start_f <= 1'b0; 	//reset transfer state
 			serial_clk_div <= 9'h1FF;
 		   serial_counter <= 4'd8;
 		end	
@@ -275,8 +324,6 @@ always @(posedge clk_cpu) begin
 	end
 	
 end
-
-			
 
 // --------------------------------------------------------------------
 // ------------------------------ inputs ------------------------------
@@ -287,11 +334,12 @@ wire [3:0] joy_p5 = ~{ joystick[7], joystick[6], joystick[5], joystick[4] } | {4
 reg  [1:0] p54;
 
 always @(posedge clk_cpu) begin
-	if(reset) p54 <= 2'b00;
+	if(reset) p54 <= 2'b11;
 	else if(sel_joy && !cpu_wr_n)	p54 <= cpu_do[5:4];
 end
 
-wire [7:0] joy_do = { 2'b11, p54, joy_p4 & joy_p5 };
+wire [7:0] joy_do = { 2'b11, joy_sgb };
+assign joy_p54 = {p54, joy_p4 & joy_p5};
 
 // --------------------------------------------------------------------
 // ---------------------------- interrupts ----------------------------
@@ -321,6 +369,8 @@ wire irq_n = !(ie_r & if_r);
 
 reg [4:0] if_r;
 reg [4:0] ie_r; // writing  $ffff sets the irq enable mask
+
+reg old_vblank_irq, old_video_irq, old_timer_irq, old_serial_irq;
 always @(negedge clk_cpu) begin //negedge to trigger interrupt earlier
 	reg old_ack = 0;
 	
@@ -329,19 +379,22 @@ always @(negedge clk_cpu) begin //negedge to trigger interrupt earlier
 		if_r <= 5'h00;
 	end
 
-	// rising edge on vs
-//	vsD <= vs;
-//	vsD2 <= vsD;
-	if(vblank_irq) if_r[0] <= 1'b1;
+    // "When an interrupt signal changes from low to high,
+    //  then the corresponding bit in the IF register becomes set."
+    old_vblank_irq <= vblank_irq;
+	if(~old_vblank_irq & vblank_irq) if_r[0] <= 1'b1;
 
 	// video irq already is a 1 clock event
-	if(video_irq) if_r[1] <= 1'b1;
+    old_video_irq <= video_irq;
+	if(~old_video_irq & video_irq) if_r[1] <= 1'b1;
 	
 	// timer_irq already is a 1 clock event
-	if(timer_irq) if_r[2] <= 1'b1;
+    old_timer_irq <= timer_irq;
+	if(~old_timer_irq & timer_irq) if_r[2] <= 1'b1;
 	
 	// serial irq already is a 1 clock event
-	if(serial_irq) if_r[3] <= 1'b1;
+    old_serial_irq <= serial_irq;
+	if(~old_serial_irq & serial_irq) if_r[3] <= 1'b1;
 
 	// falling edge on any input line P10..P13
 	inputD <= {joy_p4, joy_p5};
@@ -402,9 +455,10 @@ wire [7:0] dma_data = dma_sel_iram?iram_do:dma_sel_vram?(isGBC&&vram_bank)?vram1
 
 
 video video (
-	.reset	    ( reset         ),
-	.clk		    ( clk           ),
-	.clk_reg     ( clk_cpu       ),   //can be 2x in cgb double speed mode
+	.reset       ( reset         ),
+	.clk         ( clk_sys       ),
+	.ce          ( ce            ),   // 4Mhz
+	.ce_cpu      ( ce_cpu        ),   //can be 2x in cgb double speed mode
 	.isGBC       ( isGBC         ),
 	.isGBC_game  ( isGBC_game|boot_rom_enabled ),  //enable GBC mode during bootstrap rom
 
@@ -494,7 +548,7 @@ wire hdma_active;
 hdma hdma(
 	.reset	          ( reset         ),
 	.clk		          ( clk_sys       ),
-	.ce                ( ce_2x         ),
+	.ce                ( ce_cpu         ),
 	.speed				 ( cpu_speed     ),
 	
 	// cpu register interface

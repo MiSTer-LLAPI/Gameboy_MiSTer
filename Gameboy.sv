@@ -65,6 +65,7 @@ module emu
 	// b[0]: osd button
 	output  [1:0] BUTTONS,
 
+	input         CLK_AUDIO, // 24.576 MHz
 	output [15:0] AUDIO_L,
 	output [15:0] AUDIO_R,
 	output        AUDIO_S,   // 1 - signed audio samples, 0 - unsigned
@@ -146,17 +147,24 @@ assign VIDEO_ARY = status[4:3] == 2'b10 ? 8'd9:
 
 assign AUDIO_MIX = status[8:7];
 
+// Status Bit Map:
+// 0         1         2         3 
+// 01234567890123456789012345678901
+// 0123456789ABCDEFGHIJKLMNOPQRSTUV
+// XXXXXXXXXXX XXXX XXXX  XX
+
 `include "build_id.v" 
 localparam CONF_STR = {
 	"GAMEBOY;;",
 	"FS1,GBCGB ,Load ROM;",
 	"OEF,System,Auto,Gameboy,Gameboy Color;",
+	"ONO,Super Game Boy,Off,Palette,On;",
 	"-;",
 	"C,Cheats;",
 	"h0OH,Cheats enabled,Yes,No;",
 	"-;",
 	"OC,Inverted color,No,Yes;",
-	"O1,Palette,Grayscale,Custom;",
+	"O1,Palette,Auto,Custom;",
 	"h1F2,GBP,Load Palette;",
 	"-;",
 	"h2R9,Load Backup RAM;",
@@ -169,6 +177,7 @@ localparam CONF_STR = {
 	"O78,Stereo mix,none,25%,50%,100%;",
 	"-;",
 	"O2,Boot,Normal,Fast;",
+	"O6,Link Port,Disabled,Enabled;",
 	"-;",
 	"OU,Serial Mode,None,LLAPI;",
 	"-;",
@@ -226,6 +235,7 @@ hps_io #(.STRLEN($size(CONF_STR)>>3), .WIDE(1)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
+	.EXT_BUS(),
 
 	.conf_str(CONF_STR),
 
@@ -250,7 +260,7 @@ hps_io #(.STRLEN($size(CONF_STR)>>3), .WIDE(1)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({sav_supported,status[1],gg_available}),
+	.status_menumask({sav_supported,tint,gg_available}),
 	.direct_video(direct_video),
 	.gamma_bus(gamma_bus),
 	.forced_scandoubler(forced_scandoubler),
@@ -517,6 +527,8 @@ reg [7:0] cart_mbc_type;
 reg [7:0] cart_rom_size;
 reg [7:0] cart_ram_size;
 reg [7:0] cart_cgb_flag;
+reg [7:0] cart_sgb_flag;
+reg [7:0] cart_old_licensee;
 
 // RAM size
 wire [3:0] ram_mask =               	// 0 - no ram
@@ -562,6 +574,7 @@ wire [9:0] mbc_bank =
 	{8'd0, cart_addr[14:13]};  // no MBC, 32k linear address
 	
 wire isGBC_game = (cart_cgb_flag == 8'h80 || cart_cgb_flag == 8'hC0);
+wire isSGB_game = (cart_sgb_flag == 8'h03 && cart_old_licensee == 8'h33);
 
 reg [127:0] palette = 128'h828214517356305A5F1A3B4900000000;
 
@@ -574,8 +587,9 @@ always @(posedge clk_sys) begin
 		if(cart_download & ioctl_wr) begin
 			case(ioctl_addr)
 			   'h142: cart_cgb_flag <= ioctl_dout[15:8];
-				'h146: cart_mbc_type <= ioctl_dout[15:8];
+				'h146: {cart_mbc_type, cart_sgb_flag} <= ioctl_dout;
 				'h148: { cart_ram_size, cart_rom_size } <= ioctl_dout;
+				'h14a: { cart_old_licensee } <= ioctl_dout[15:8];
 			endcase
 		end 
 	end
@@ -611,7 +625,10 @@ wire reset = (RESET | status[0] | buttons[1] | cart_download | bk_loading);
 wire speed;
 
 reg isGBC = 0;
-always @(posedge clk_sys) if(reset) isGBC <= status[15:14] ? status[15] : !filetype[7:4];
+always @(posedge clk_sys) if(reset) begin
+	if(status[15:14]) isGBC <= status[15];
+	else if(cart_download) isGBC <= !filetype[7:4];
+end
 
 // the gameboy itself
 gb gb (
@@ -625,6 +642,9 @@ gb gb (
 	.joystick    ( joystick   ),
 	.isGBC       ( isGBC      ),
 	.isGBC_game  ( isGBC_game ),
+
+	.joy_p54     (joy_p54     ),
+	.joy_sgb     (joy_do_sgb  ),
 
 	// interface to the "external" game cartridge
 	.cart_addr   ( cart_addr  ),
@@ -648,6 +668,14 @@ gb gb (
 	.lcd_on      ( lcd_on     ),
 	.speed       ( speed      ),
 	
+	// serial port
+	.sc_int_clock2(sc_int_clock_out),
+	.serial_clk_in(ser_clk_in),
+	.serial_data_in(ser_data_in),
+	.serial_clk_out(ser_clk_out),
+	.serial_data_out(ser_data_out),
+	.serial_ena(status[6]),
+	
 	// Palette download will disable cheats option (HPS doesn't distinguish downloads),
 	// so clear the cheats and disable second option (chheats enable/disable)
 	.gg_reset((code_download && ioctl_wr && !ioctl_addr) | cart_download | palette_download),
@@ -661,19 +689,21 @@ wire [7:0] video_r, video_g, video_b;
 wire video_hs, video_vs;
 wire HBlank, VBlank;
 wire ce_pix;
+wire [8:0] h_cnt, v_cnt;
+wire tint = status[1];
 
 lcd lcd
 (
 	// serial interface
 	.clk_sys( clk_sys    ),
-	.pix_wr ( lcd_clkena & ce_cpu ),
-	.data   ( lcd_data   ),
-	.mode   ( lcd_mode   ),  // used to detect begin of new lines and frames
-	.on     ( lcd_on     ),
+	.pix_wr ( sgb_lcd_clkena & ce_cpu ),
+	.data   ( sgb_lcd_data   ),
+	.mode   ( sgb_lcd_mode   ),  // used to detect begin of new lines and frames
+	.on     ( sgb_lcd_on     ),
 
 	.isGBC  ( isGBC      ),
 
-	.tint   ( status[1]  ),
+	.tint   ( tint  ),
 	.inv    ( status[12]  ),
 	.double_buffer( status[5]),
 
@@ -683,6 +713,10 @@ lcd lcd
 	.pal3   (palette[79:56]),
 	.pal4   (palette[55:32]),
 
+	.sgb_border_pix ( sgb_border_pix),
+	.sgb_pal_en     ( sgb_pal_en ),
+	.sgb_en         ( !sgb_en     ),
+
 	.clk_vid( CLK_VIDEO  ),
 	.hs     ( video_hs   ),
 	.vs     ( video_vs   ),
@@ -691,7 +725,47 @@ lcd lcd
 	.r      ( video_r    ),
 	.g      ( video_g    ),
 	.b      ( video_b    ),
-	.ce_pix ( ce_pix     )
+	.ce_pix ( ce_pix     ),
+	.h_cnt  ( h_cnt      ),
+	.v_cnt  ( v_cnt      )
+);
+
+wire [5:0] joy_p54, joy_do_sgb;
+wire [14:0] sgb_lcd_data;
+wire [15:0] sgb_border_pix;
+wire sgb_lcd_clkena, sgb_lcd_on;
+wire [1:0] sgb_lcd_mode;
+wire sgb_pal_en;
+wire [1:0] sgb_en = {~status[24] ^ status[23], status[23]};
+
+sgb sgb (
+	.reset       ( reset       ),
+	.clk_sys     ( clk_sys     ),
+	.ce          ( ce_cpu      ),
+
+	.clk_vid     ( CLK_VIDEO   ),
+	.ce_pix      ( ce_pix      ),
+
+	.joy_di      ( joy_p54     ),
+	.joy_do      ( joy_do_sgb  ),
+
+	.sgb_en      ( ~sgb_en[1] & isSGB_game & ~isGBC ),
+	.tint        ( tint  ),
+
+	.lcd_on      ( lcd_on      ),
+	.lcd_clkena  ( lcd_clkena  ),
+	.lcd_data    ( lcd_data    ),
+	.lcd_mode    ( lcd_mode    ),
+
+	.h_cnt       ( h_cnt      ),
+	.v_cnt       ( v_cnt      ),
+
+	.sgb_border_pix  ( sgb_border_pix  ),
+	.sgb_pal_en      ( sgb_pal_en      ),
+	.sgb_lcd_data    ( sgb_lcd_data    ),
+	.sgb_lcd_on      ( sgb_lcd_on      ),
+	.sgb_lcd_clkena  ( sgb_lcd_clkena  ),
+	.sgb_lcd_mode    ( sgb_lcd_mode    )
 );
 
 reg hs_o, vs_o;
@@ -785,6 +859,28 @@ always_ff @(posedge clk_sys) begin
 		endcase
 	end
 end
+
+/////////////////////////////  Serial link  ///////////////////////////////
+
+assign USER_OUT[2] = 1'b1;
+assign USER_OUT[3] = 1'b1;
+assign USER_OUT[4] = 1'b1;
+assign USER_OUT[5] = 1'b1;
+assign USER_OUT[6] = 1'b1;
+
+wire sc_int_clock_out;
+wire ser_data_in;
+wire ser_data_out;
+wire ser_clk_in;
+wire ser_clk_out;
+
+assign ser_data_in = USER_IN[2];	
+assign USER_OUT[1] = ser_data_out;
+
+assign ser_clk_in = USER_IN[0];
+assign USER_OUT[0] = sc_int_clock_out?ser_clk_out:1'b1;
+
+
 
 /////////////////////////  BRAM SAVE/LOAD  /////////////////////////////
 
