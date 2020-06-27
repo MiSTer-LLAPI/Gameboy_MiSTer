@@ -151,7 +151,7 @@ assign AUDIO_MIX = status[8:7];
 // 0         1         2         3 
 // 01234567890123456789012345678901
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXX XXXX XXXX  XX
+// XXXXXX XXXX XXXX XXXX  XX     XX
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -177,9 +177,8 @@ localparam CONF_STR = {
 	"O78,Stereo mix,none,25%,50%,100%;",
 	"-;",
 	"O2,Boot,Normal,Fast;",
-	"O6,Link Port,Disabled,Enabled;",
 	"-;",
-	"OU,Serial Mode,None,LLAPI;",
+	"OUV,Serial Mode,None,Link Port,LLAPI;",
 	"-;",
 	"R0,Reset;",
 	"J1,A,B,Select,Start;",
@@ -216,7 +215,8 @@ wire [24:0] ioctl_addr;
 wire [15:0] ioctl_dout;
 reg         ioctl_wait;
 
-wire [15:0] joystick_0, joystick_1;
+wire [15:0] joystick_usb0, joystick_usb1, joystick_usb2, joystick_usb3;
+
 wire [7:0]  filetype;
 
 reg  [31:0] sd_lba;
@@ -265,8 +265,10 @@ hps_io #(.STRLEN($size(CONF_STR)>>3), .WIDE(1)) hps_io
 	.gamma_bus(gamma_bus),
 	.forced_scandoubler(forced_scandoubler),
 
-	.joystick_0(joystick_0),
-	.joystick_1(joystick_1)
+	.joystick_0(joystick_usb0),
+	.joystick_1(joystick_usb1),
+	.joystick_2(joystick_usb2),
+	.joystick_3(joystick_usb3)
 );
 
 ///////////////////////////////////////////////////
@@ -324,12 +326,31 @@ end
 
 //////////////////   LLAPI   ///////////////////
 
+reg llapi_button_pressed, llapi_button_pressed2;
+
+always @(posedge CLK_50M) begin
+        if (reset) begin
+                llapi_button_pressed  <= 0;
+                llapi_button_pressed2 <= 0;
+        end else begin
+                if (|llapi_buttons)
+                        llapi_button_pressed  <= 1;
+                if (|llapi_buttons2)
+                        llapi_button_pressed2 <= 1;
+        end
+end
+
+// controller id is 0 if there is either an Atari controller or no controller
+// if id is 0, assume there is no controller until a button is pressed
+wire use_llapi = llapi_en && llapi_select && (|llapi_type || llapi_button_pressed);
+wire use_llapi2 = llapi_en2 && llapi_select && (|llapi_type2 || llapi_button_pressed2);
+
 wire [31:0] llapi_buttons, llapi_buttons2;
 wire [71:0] llapi_analog, llapi_analog2;
 wire [7:0]  llapi_type, llapi_type2;
 wire llapi_en, llapi_en2;
 
-wire llapi_select = status[30];
+wire llapi_select = status[31];
 
 wire llapi_latch_o, llapi_latch_o2, llapi_data_o, llapi_data_o2;
 
@@ -341,6 +362,9 @@ always_comb begin
 		USER_OUT[2] = ~(llapi_select & ~OSD_STATUS);
 		USER_OUT[4] = llapi_latch_o2;
 		USER_OUT[5] = llapi_data_o2;
+	end else if (status[30]) begin
+		USER_OUT[1] = ser_data_out;
+		USER_OUT[0] = sc_int_clock_out?ser_clk_out:1'b1;
 	end
 end
 
@@ -398,7 +422,26 @@ wire [15:0] joy_ll_b = { 8'd0,
 
 wire llapi_osd = (llapi_buttons[26] & llapi_buttons[5] & llapi_buttons[0]) || (llapi_buttons2[26] & llapi_buttons2[5] & llapi_buttons2[0]);
 
-wire [15:0] joystick = joy_ll_a | joy_ll_b | joystick_0 | joystick_1;
+wire [15:0] joystick_0, joystick_1, joystick_2, joystick_3;
+// if LLAPI is enabled, shift USB controllers over to the next available player slot
+always_comb begin
+        if (use_llapi && use_llapi2) begin
+                joystick_0 = joy_ll_a;
+                joystick_1 = joy_ll_b;
+                joystick_2 = joystick_usb0;
+                joystick_3 = joystick_usb1;
+        end else if (use_llapi || use_llapi2) begin
+                joystick_0 = use_llapi  ? joy_ll_a : joystick_usb0;
+                joystick_1 = use_llapi2 ? joy_ll_b : joystick_usb0;
+                joystick_2 = joystick_usb1;
+                joystick_3 = joystick_usb2;
+        end else begin
+                joystick_0 = joystick_usb0;
+                joystick_1 = joystick_usb1;
+                joystick_2 = joystick_usb2;
+                joystick_3 = joystick_usb3;
+        end
+end
 
 ///////////////////////////////////////////////////
 
@@ -639,12 +682,12 @@ gb gb (
 	.ce_2x       ( ce_cpu2x   ),   // ~8MHz in dualspeed mode (GBC)
 	
 	.fast_boot   ( status[2]  ),
-	.joystick    ( joystick   ),
+
 	.isGBC       ( isGBC      ),
 	.isGBC_game  ( isGBC_game ),
 
 	.joy_p54     (joy_p54     ),
-	.joy_sgb     (joy_do_sgb  ),
+	.joy_din     ( joy_do_sgb  ),
 
 	// interface to the "external" game cartridge
 	.cart_addr   ( cart_addr  ),
@@ -674,7 +717,7 @@ gb gb (
 	.serial_data_in(ser_data_in),
 	.serial_clk_out(ser_clk_out),
 	.serial_data_out(ser_data_out),
-	.serial_ena(status[6]),
+	.serial_ena(status[30]),
 	
 	// Palette download will disable cheats option (HPS doesn't distinguish downloads),
 	// so clear the cheats and disable second option (chheats enable/disable)
@@ -730,7 +773,8 @@ lcd lcd
 	.v_cnt  ( v_cnt      )
 );
 
-wire [5:0] joy_p54, joy_do_sgb;
+wire [1:0] joy_p54;
+wire [3:0] joy_do_sgb;
 wire [14:0] sgb_lcd_data;
 wire [15:0] sgb_border_pix;
 wire sgb_lcd_clkena, sgb_lcd_on;
@@ -746,7 +790,11 @@ sgb sgb (
 	.clk_vid     ( CLK_VIDEO   ),
 	.ce_pix      ( ce_pix      ),
 
-	.joy_di      ( joy_p54     ),
+	.joystick_0  ( joystick_0  ),
+	.joystick_1  ( joystick_1  ),
+	.joystick_2  ( joystick_2  ),
+	.joystick_3  ( joystick_3  ),
+	.joy_p54     ( joy_p54     ),
 	.joy_do      ( joy_do_sgb  ),
 
 	.sgb_en      ( ~sgb_en[1] & isSGB_game & ~isGBC ),
@@ -862,12 +910,6 @@ end
 
 /////////////////////////////  Serial link  ///////////////////////////////
 
-assign USER_OUT[2] = 1'b1;
-assign USER_OUT[3] = 1'b1;
-assign USER_OUT[4] = 1'b1;
-assign USER_OUT[5] = 1'b1;
-assign USER_OUT[6] = 1'b1;
-
 wire sc_int_clock_out;
 wire ser_data_in;
 wire ser_data_out;
@@ -875,11 +917,8 @@ wire ser_clk_in;
 wire ser_clk_out;
 
 assign ser_data_in = USER_IN[2];	
-assign USER_OUT[1] = ser_data_out;
 
 assign ser_clk_in = USER_IN[0];
-assign USER_OUT[0] = sc_int_clock_out?ser_clk_out:1'b1;
-
 
 
 /////////////////////////  BRAM SAVE/LOAD  /////////////////////////////
