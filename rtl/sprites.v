@@ -24,7 +24,8 @@ module sprites (
 	input ce,
 	input ce_cpu,
 	input size16,
-	input isGBC_game,
+	input isGBC,
+	input sprite_en,
 
 	input lcd_on,
 
@@ -50,32 +51,43 @@ module sprites (
 	input oam_wr,
 	input [7:0] oam_addr_in,
 	input [7:0] oam_di,
-	output [7:0] oam_do
+	output [7:0] oam_do,
+   
+   // savestates
+   input [7:0] Savestate_OAMRAMAddr,     
+   input       Savestate_OAMRAMRWrEn,    
+   input [7:0] Savestate_OAMRAMWriteData,
+   output[7:0] Savestate_OAMRAMReadData  
 );
 
 localparam SPRITES_PER_LINE = 10;
 
+reg [7:0] oam_spr_addr;
+wire [7:0] oam_fetch_addr;
+reg [7:0] oam_q;
 
 wire [7:0] oam_addr = dma_active ? oam_addr_in :
 						oam_eval ? oam_spr_addr :
 						oam_fetch ? oam_fetch_addr :
 						oam_addr_in;
-
-reg [7:0] oam_spr_addr;
+                  
 wire valid_oam_addr = (oam_addr[7:4] < 4'hA); // $FEA0 - $FEFF unused range
 assign oam_do = dma_active ? 8'hFF : valid_oam_addr ? oam_q : 8'd0;
 
-reg [7:0] oam_data[0:159];
-reg [7:0] oam_q;
-always @(posedge clk) begin
-	if (ce_cpu) begin
-		if(oam_wr && valid_oam_addr) begin
-			oam_data[oam_addr] <= oam_di;
-		end
-	end
 
-	oam_q <= oam_data[oam_addr];
-end
+dpram #(8) oam_data (
+	.clock_a   (clk      ),
+	.address_a (oam_addr ),
+	.wren_a    (ce_cpu && oam_wr && valid_oam_addr),
+	.data_a    (oam_di   ),
+	.q_a       (oam_q    ),
+	
+	.clock_b   (clk),
+	.address_b (Savestate_OAMRAMAddr     ),
+	.wren_b    (Savestate_OAMRAMRWrEn    ),
+	.data_b    (Savestate_OAMRAMWriteData),
+	.q_b       (Savestate_OAMRAMReadData )
+);
 
 reg [7:0] sprite_x[0:SPRITES_PER_LINE-1];
 reg [3:0] sprite_y[0:SPRITES_PER_LINE-1];
@@ -92,65 +104,85 @@ wire sprite_on_line = (v_cnt + 8'd16 >= spr_y) && (v_cnt + 8'd16 < spr_y + spr_h
 
 assign oam_eval_end = (spr_index == 6'd40);
 
+wire [0:9] sprite_x_matches;
+
 reg old_fetch_done;
 always @(posedge clk) begin
-	if (!lcd_on) begin
-		sprite_cnt <= 0;
-		spr_index <= 0;
-		sprite_cycle <= 0;
-		oam_spr_addr <= 0;
-	end else if (ce) begin
-		if (oam_eval) begin
+	if (ce) begin
 
-			if (spr_index < 6'd40) begin
-				if (sprite_cycle) spr_index <= spr_index + 1'b1;
-
-				if (sprite_cnt < SPRITES_PER_LINE) begin
-					if (~sprite_cycle) begin
-						spr_y <= oam_do;
-						oam_spr_addr <= {spr_index,2'b01};
-					end else begin
-						if (sprite_on_line) begin
-							sprite_no[sprite_cnt] <= spr_index;
-							sprite_x[sprite_cnt] <= oam_do;
-							sprite_y[sprite_cnt] <= v_cnt[3:0] - spr_y[3:0];
-							sprite_cnt <= sprite_cnt + 1'b1;
-						end
-						oam_spr_addr <= {spr_index+1'b1, 2'b00};
-					end
-				end
-			end
-
-			sprite_cycle <= ~sprite_cycle;
-		end
-
-		if (oam_eval_reset) begin
+		if (oam_eval_reset | ~lcd_on) begin
 			sprite_cnt <= 0;
 			spr_index <= 0;
 			sprite_cycle <= 0;
 			oam_spr_addr <= 0;
-		end
+			sprite_x[0] <= 8'hFF;
+			sprite_x[1] <= 8'hFF;
+			sprite_x[2] <= 8'hFF;
+			sprite_x[3] <= 8'hFF;
+			sprite_x[4] <= 8'hFF;
+			sprite_x[5] <= 8'hFF;
+			sprite_x[6] <= 8'hFF;
+			sprite_x[7] <= 8'hFF;
+			sprite_x[8] <= 8'hFF;
+			sprite_x[9] <= 8'hFF;
+			sprite_no[0] <= 6'd0;
+			sprite_no[1] <= 6'd0;
+			sprite_no[2] <= 6'd0;
+			sprite_no[3] <= 6'd0;
+			sprite_no[4] <= 6'd0;
+			sprite_no[5] <= 6'd0;
+			sprite_no[6] <= 6'd0;
+			sprite_no[7] <= 6'd0;
+			sprite_no[8] <= 6'd0;
+			sprite_no[9] <= 6'd0;
+		end else begin
 
-		// Set X-position to FF after fetching the sprite to prevent fetching it again.
-		old_fetch_done <= sprite_fetch_done;
-		if (~old_fetch_done & sprite_fetch_done) begin
-			if (sprite_x_matches[0]) sprite_x[0] <= 8'hFF;
-			else if (sprite_x_matches[1]) sprite_x[1] <= 8'hFF;
-			else if (sprite_x_matches[2]) sprite_x[2] <= 8'hFF;
-			else if (sprite_x_matches[3]) sprite_x[3] <= 8'hFF;
-			else if (sprite_x_matches[4]) sprite_x[4] <= 8'hFF;
-			else if (sprite_x_matches[5]) sprite_x[5] <= 8'hFF;
-			else if (sprite_x_matches[6]) sprite_x[6] <= 8'hFF;
-			else if (sprite_x_matches[7]) sprite_x[7] <= 8'hFF;
-			else if (sprite_x_matches[8]) sprite_x[8] <= 8'hFF;
-			else if (sprite_x_matches[9]) sprite_x[9] <= 8'hFF;
+			if (oam_eval) begin
+
+				if (spr_index < 6'd40) begin
+					if (sprite_cycle) spr_index <= spr_index + 1'b1;
+
+					if (sprite_cnt < SPRITES_PER_LINE) begin
+						if (~sprite_cycle) begin
+							spr_y <= oam_do;
+							oam_spr_addr <= {spr_index,2'b01};
+						end else begin
+							if (sprite_on_line) begin
+								sprite_no[sprite_cnt] <= spr_index;
+								sprite_x[sprite_cnt] <= oam_do;
+								sprite_y[sprite_cnt] <= v_cnt[3:0] - spr_y[3:0];
+								sprite_cnt <= sprite_cnt + 1'b1;
+							end
+							oam_spr_addr <= {spr_index+1'b1, 2'b00};
+						end
+					end
+				end
+
+				sprite_cycle <= ~sprite_cycle;
+			end
+
+			// Set X-position to FF after fetching the sprite to prevent fetching it again.
+			old_fetch_done <= sprite_fetch_done;
+			if (~old_fetch_done & sprite_fetch_done) begin
+				if (sprite_x_matches[0]) sprite_x[0] <= 8'hFF;
+				else if (sprite_x_matches[1]) sprite_x[1] <= 8'hFF;
+				else if (sprite_x_matches[2]) sprite_x[2] <= 8'hFF;
+				else if (sprite_x_matches[3]) sprite_x[3] <= 8'hFF;
+				else if (sprite_x_matches[4]) sprite_x[4] <= 8'hFF;
+				else if (sprite_x_matches[5]) sprite_x[5] <= 8'hFF;
+				else if (sprite_x_matches[6]) sprite_x[6] <= 8'hFF;
+				else if (sprite_x_matches[7]) sprite_x[7] <= 8'hFF;
+				else if (sprite_x_matches[8]) sprite_x[8] <= 8'hFF;
+				else if (sprite_x_matches[9]) sprite_x[9] <= 8'hFF;
+			end
+
 		end
 	end
 end
 
 
 // Sprite fetching
-wire [0:9] sprite_x_matches = {
+assign sprite_x_matches = {
 		sprite_x[0] == h_cnt,
 		sprite_x[1] == h_cnt,
 		sprite_x[2] == h_cnt,
@@ -163,7 +195,7 @@ wire [0:9] sprite_x_matches = {
 		sprite_x[9] == h_cnt
 };
 
-assign sprite_fetch = |sprite_x_matches & oam_fetch;
+assign sprite_fetch = |sprite_x_matches & oam_fetch & (isGBC | sprite_en);
 
 wire [3:0] active_sprite =
 		sprite_x_matches[0] ? 4'd0 :
@@ -183,7 +215,7 @@ wire [5:0] oam_fetch_index = sprite_no[active_sprite];
 reg [3:0] row;
 reg [7:0] tile_no;
 reg oam_fetch_cycle;
-wire [7:0] oam_fetch_addr = {oam_fetch_index, 1'b1, oam_fetch_cycle};
+assign oam_fetch_addr = {oam_fetch_index, 1'b1, oam_fetch_cycle};
 assign sprite_addr = size16 ? {tile_no[7:1],row} : {tile_no,row[2:0]};
 
 always @(posedge clk) begin
