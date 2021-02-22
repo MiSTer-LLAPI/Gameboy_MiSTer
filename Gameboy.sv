@@ -53,6 +53,33 @@ module emu
 	output  [1:0] VGA_SL,
 	output        VGA_SCALER, // Force VGA scaler
 
+`ifdef USE_FB
+	// Use framebuffer in DDRAM (USE_FB=1 in qsf)
+	// FB_FORMAT:
+	//    [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
+	//    [3]   : 0=16bits 565 1=16bits 1555
+	//    [4]   : 0=RGB  1=BGR (for 16/24/32 modes)
+	//
+	// FB_STRIDE either 0 (rounded to 256 bytes) or multiple of pixel size (in bytes)
+	output        FB_EN,
+	output  [4:0] FB_FORMAT,
+	output [11:0] FB_WIDTH,
+	output [11:0] FB_HEIGHT,
+	output [31:0] FB_BASE,
+	output [13:0] FB_STRIDE,
+	input         FB_VBL,
+	input         FB_LL,
+	output        FB_FORCE_BLANK,
+
+	// Palette control for 8bit modes.
+	// Ignored for other video modes.
+	output        FB_PAL_CLK,
+	output  [7:0] FB_PAL_ADDR,
+	output [23:0] FB_PAL_DOUT,
+	input  [23:0] FB_PAL_DIN,
+	output        FB_PAL_WR,
+`endif
+
 	output        LED_USER,  // 1 - ON, 0 - OFF.
 
 	// b[1]: 0 - LED status is system status OR'd with b[0]
@@ -82,6 +109,7 @@ module emu
 	output        SD_CS,
 	input         SD_CD,
 
+`ifdef USE_DDRAM
 	//High latency DDR3 RAM interface
 	//Use for non-critical time purposes
 	output        DDRAM_CLK,
@@ -94,7 +122,9 @@ module emu
 	output [63:0] DDRAM_DIN,
 	output  [7:0] DDRAM_BE,
 	output        DDRAM_WE,
+`endif
 
+`ifdef USE_SDRAM
 	//SDRAM interface with lower latency
 	output        SDRAM_CLK,
 	output        SDRAM_CKE,
@@ -107,6 +137,20 @@ module emu
 	output        SDRAM_nCAS,
 	output        SDRAM_nRAS,
 	output        SDRAM_nWE,
+`endif
+
+`ifdef DUAL_SDRAM
+	//Secondary SDRAM
+	input         SDRAM2_EN,
+	output        SDRAM2_CLK,
+	output [12:0] SDRAM2_A,
+	output  [1:0] SDRAM2_BA,
+	inout  [15:0] SDRAM2_DQ,
+	output        SDRAM2_nCS,
+	output        SDRAM2_nCAS,
+	output        SDRAM2_nRAS,
+	output        SDRAM2_nWE,
+`endif
 
 	input         UART_CTS,
 	output        UART_RTS,
@@ -568,7 +612,7 @@ always @(posedge clk_sys) begin
 		
 		//write to ROM bank register
 		if(cart_wr && (cart_addr[15:13] == 3'b001)) begin
-			if(~mbc5 && cart_di[6:0]==0) //special case mbc1-3 rombank 0=1
+			if(~mbc5 && (cart_di[6:0]==0 || (mbc1 && cart_di[4:0]==0) || (mbc2 && cart_di[3:0]==0))) //special case mbc1-3 rombank 0=1
 				mbc_rom_bank_reg <= 5'd1;
 			else if (mbc5) begin
 				if (cart_addr[13:12] == 2'b11) //3000-3FFF High bit
@@ -725,7 +769,7 @@ wire [1:0] lcd_mode;
 wire lcd_on;
 wire lcd_vsync;
 
-wire HDMA_on;
+wire DMA_on;
 
 assign AUDIO_S = 0;
 
@@ -753,6 +797,7 @@ gb gb (
 
 	.isGBC       ( isGBC      ),
 	.isGBC_game  ( isGBC_game ),
+	.isSGB       ( ~sgb_en[1] & ~isGBC ),
 
 	.joy_p54     (joy_p54     ),
 	.joy_din     ( joy_do_sgb  ),
@@ -780,7 +825,7 @@ gb gb (
 	.lcd_vsync   ( lcd_vsync  ),
 	
 	.speed       ( speed      ),
-	.HDMA_on     ( HDMA_on    ),
+	.DMA_on      ( DMA_on    ),
 	
 	// serial port
 	.sc_int_clock2(sc_int_clock_out),
@@ -981,7 +1026,7 @@ speedcontrol speedcontrol
 	.pause       (paused),
 	.speedup     (fast_forward),
 	.cart_act    (cart_act),
-	.HDMA_on     (HDMA_on),
+	.DMA_on      (DMA_on),
 	.ce          (ce_cpu),
 	.ce_2x       (ce_cpu2x),
 	.refresh     (sdram_refresh_force),
@@ -1203,7 +1248,7 @@ wire [7:0] cram_q_l;
 
 wire is_cram_addr = (cart_addr[15:13] == 3'b101);
 wire cram_rd = cart_rd & is_cram_addr;
-wire cram_wr = sleep_savestate ? Savestate_CRAMRWrEn : cart_wr & is_cram_addr;
+wire cram_wr = sleep_savestate ? Savestate_CRAMRWrEn : cart_wr & is_cram_addr & mbc_ram_enable;
 wire [16:0] cram_addr = sleep_savestate ? Savestate_CRAMAddr[16:0]:
                         mbc1? {2'b00,mbc1_ram_bank, cart_addr[12:0]}:
 								mbc3? {2'b00,mbc3_ram_bank, cart_addr[12:0]}:
