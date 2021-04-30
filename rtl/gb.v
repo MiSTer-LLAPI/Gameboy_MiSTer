@@ -74,6 +74,7 @@ module gb (
 	output serial_data_out,
 	
 	// savestates
+	input        increaseSSHeaderCount,
 	input  [7:0] cart_ram_size,
 	input        save_state,
 	input        load_state,
@@ -98,6 +99,7 @@ module gb (
 	output [25:0] SAVE_out_Adr,  	// all addresses are DWORD addresses!
 	output        SAVE_out_rnw,     // read = 1, write = 0
 	output        SAVE_out_ena,     // one cycle high for each action
+	output  [7:0] SAVE_out_be,     
 	input         SAVE_out_done,    // should be one cycle high when write is done or read value is valid
 	
 	input         rewind_on,
@@ -117,10 +119,10 @@ wire [4:0] Savestate_RAMRWrEn;
 localparam SAVESTATE_MODULES    = 7;
 wire [63:0] SaveStateBus_wired_or[0:SAVESTATE_MODULES-1];
 
-wire [53:0] SS_Top;
-wire [53:0] SS_Top_BACK;
+wire [54:0] SS_Top;
+wire [54:0] SS_Top_BACK;
 
-eReg_SavestateV #(0, 31, 53, 0, 64'h0000000000800001) iREG_SAVESTATE_Top (clk_sys, SaveStateBus_Din, SaveStateBus_Adr, SaveStateBus_wren, SaveStateBus_rst, SaveStateBus_wired_or[6], SS_Top_BACK, SS_Top);  
+eReg_SavestateV #(0, 31, 54, 0, 64'h0000000000800001) iREG_SAVESTATE_Top (clk_sys, SaveStateBus_Din, SaveStateBus_Adr, SaveStateBus_wren, SaveStateBus_rst, SaveStateBus_wired_or[6], SS_Top_BACK, SS_Top);  
 
 // include cpu
 reg boot_rom_enabled;
@@ -195,6 +197,9 @@ wire hdma_active;
 reg cpu_speed; // - 0 Normal mode (4MHz) - 1 Double Speed Mode (8MHz)
 reg prepare_switch; // set to 1 to toggle speed
 
+wire oam_cpu_allow;
+wire vram_cpu_allow;
+
 wire [7:0] joy_do;
 wire [7:0] sb_o;
 wire [7:0] timer_do;
@@ -226,11 +231,11 @@ wire [7:0] cpu_di =
 		sel_sc?sc_r:				// serial transfer control register
 		sel_timer?timer_do:     // timer registers
 		sel_video_reg?video_do: // video registers
-		(sel_video_oam&&!(lcd_mode==3 || lcd_mode==2))?video_do: // video object attribute memory
+		(sel_video_oam&&oam_cpu_allow)?video_do: // video object attribute memory
 		sel_audio?audio_do:                                // audio registers
 		sel_rom?rom_do:                                    // boot rom + cartridge rom
 		sel_cram?rom_do:                                   // cartridge ram
-		(sel_vram&&lcd_mode!=3)?(isGBC&&vram_bank)?vram1_do:vram_do:       // vram (GBC bank 0+1)
+		(sel_vram&&vram_cpu_allow)?(isGBC&&vram_bank)?vram1_do:vram_do:       // vram (GBC bank 0+1)
 		sel_zpram?zpram_do:     // zero page ram
 		sel_iram?iram_do:       // internal ram
 		sel_ie?ie_r:  // interrupt enable register
@@ -260,6 +265,15 @@ always  @ (posedge clk) begin
 	reset_r <= reset;
 end
 
+reg old_cpu_wr_n;
+
+assign SS_Top_BACK[54] = old_cpu_wr_n;
+
+always @(posedge clk_sys) begin
+	if(reset_ss) old_cpu_wr_n <= SS_Top[54]; // 1'b0
+	else if (cpu_clken) old_cpu_wr_n <= cpu_wr_n;
+end
+wire cpu_wr_n_edge = ~(old_cpu_wr_n & ~cpu_wr_n);
 
 wire cpu_stop;
 
@@ -286,6 +300,7 @@ GBse cpu (
    .DI                ( genie_ovr ? genie_data : cpu_di),
    .DO                ( cpu_do          ),
 	.STOP              ( cpu_stop        ),
+    .isGBC             ( isGBC           ),
    // savestates
    .SaveStateBus_Din  (SaveStateBus_Din ), 
    .SaveStateBus_Adr  (SaveStateBus_Adr ),
@@ -324,7 +339,7 @@ always @(posedge clk_sys) begin
 		cpu_speed      <= SS_Top[3]; // 1'b0;
 		prepare_switch <= SS_Top[4]; // 1'b0;
 	end
-	else if (ce_2x && sel_key1 && !cpu_wr_n)begin
+	else if (ce_2x && sel_key1 && !cpu_wr_n_edge)begin
 		prepare_switch <= cpu_do[0];
 	end
 	
@@ -339,7 +354,7 @@ end
 // --------------------------------------------------------------------
 
 wire audio_rd = !cpu_rd_n && sel_audio;
-wire audio_wr = !cpu_wr_n && sel_audio;
+wire audio_wr = !cpu_wr_n_edge && sel_audio;
 
 gbc_snd audio (
 	.clk				( clk_sys			),
@@ -380,7 +395,7 @@ link link (
 
   .sel_sc(sel_sc),
   .sel_sb(sel_sb),
-  .cpu_wr_n(cpu_wr_n),
+  .cpu_wr_n(cpu_wr_n_edge),
   .sc_start_in(cpu_do[7]),
   .sc_int_clock_in(cpu_do[0]),
 
@@ -413,7 +428,7 @@ assign SS_Top_BACK[6:5] = p54;
 
 always @(posedge clk_sys) begin
 	if(reset_ss) p54 <= SS_Top[6:5]; //2'b00 for DMG, 2'b11 for CGB/SGB will be written by BIOS
-	else if(ce_cpu && sel_joy && !cpu_wr_n)	p54 <= cpu_do[5:4];
+	else if(ce_cpu && sel_joy && !cpu_wr_n_edge)	p54 <= cpu_do[5:4];
 end
 
 assign joy_do = { 2'b11, p54, joy_din };
@@ -434,7 +449,7 @@ always @(posedge clk_sys) begin
 		FF73 <= SS_Top[42:35]; // 0;  
 		FF74 <= SS_Top[50:43]; // 0;  
 		FF75 <= SS_Top[53:51]; // 0;  
-	end else if(ce_cpu && !cpu_wr_n)	begin
+	end else if(ce_cpu && !cpu_wr_n_edge)	begin
 		if (sel_FF72) FF72 <= cpu_do;
 		if (sel_FF73) FF73 <= cpu_do;
 		if (sel_FF74) FF74 <= cpu_do;
@@ -532,11 +547,11 @@ always @(negedge clk_sys) begin //negedge to trigger interrupt earlier
 		end
 	
 		// cpu writes interrupt enable register
-		if(sel_ie && !cpu_wr_n)
+		if(sel_ie && !cpu_wr_n_edge)
 			ie_r <= cpu_do;
 	
 		// cpu writes interrupt flag register
-		if(sel_if && !cpu_wr_n)
+		if(sel_if && !cpu_wr_n_edge)
 			if_r <= cpu_do[4:0];
 			
 	end
@@ -555,7 +570,7 @@ timer timer (
 				 
 	.cpu_sel     		 ( sel_timer     ),
 	.cpu_addr    		 ( cpu_addr[1:0] ),
-	.cpu_wr      		 ( !cpu_wr_n     ),
+	.cpu_wr      		 ( !cpu_wr_n_edge ),
 	.cpu_di      		 ( cpu_do        ),
 	.cpu_do      		 ( timer_do      ),
 	
@@ -591,7 +606,7 @@ video video (
 	.cpu_sel_reg ( sel_video_reg ),
 	.cpu_sel_oam ( sel_video_oam ),
 	.cpu_addr    ( cpu_addr[7:0] ),
-	.cpu_wr      ( !cpu_wr_n     ),
+	.cpu_wr      ( !cpu_wr_n_edge ),
 	.cpu_di      ( cpu_do        ),
 	.cpu_do      ( video_do      ),
 	
@@ -601,6 +616,8 @@ video video (
 	.mode        ( lcd_mode      ),
 	.lcd_vsync   ( lcd_vsync     ),
 
+	.oam_cpu_allow  ( oam_cpu_allow  ),
+	.vram_cpu_allow ( vram_cpu_allow ),
 	.vram_rd     ( video_rd      ),
 	.vram_addr   ( video_addr    ),
 	.vram_data   ( vram_do       ),
@@ -625,7 +642,7 @@ video video (
 );
 
 // total 8k/16k (CGB) vram from $8000 to $9fff
-wire cpu_wr_vram = sel_vram && !cpu_wr_n && lcd_mode!=3;
+wire cpu_wr_vram = sel_vram && !cpu_wr_n && vram_cpu_allow;
 
 wire hdma_rd;
 wire is_hdma_cart_addr;
@@ -683,7 +700,7 @@ always @(posedge clk_sys) begin
 	if(reset_ss)
 		vram_bank <= SS_Top[22]; // 1'd0;
 	else if (ce_cpu) begin
-		if((cpu_addr == 16'hff4f) && !cpu_wr_n && isGBC)
+		if((cpu_addr == 16'hff4f) && !cpu_wr_n_edge && isGBC)
 			vram_bank <= cpu_do[0];
 	end
 end
@@ -701,7 +718,7 @@ hdma hdma(
 	// cpu register interface
 	.sel_reg 	       ( sel_hdma      ),
 	.addr			       ( cpu_addr[3:0] ),
-	.wr			       ( !cpu_wr_n 	  ),
+	.wr			       ( !cpu_wr_n_edge   ),
 	.dout			       ( hdma_do       ),
 	.din               ( cpu_do        ),
 	
@@ -778,7 +795,7 @@ assign SS_Top_BACK[2:0] = iram_bank;
 always @(posedge clk_sys) begin
 	if(reset_ss)
 		iram_bank <= SS_Top[2:0]; // 3'd1;
-	else if(ce_cpu && sel_iram_bank && !cpu_wr_n) begin
+	else if(ce_cpu && sel_iram_bank && !cpu_wr_n_edge) begin
 		if (cpu_do[2:0]==3'd0) // 0 -> 1;
 			iram_bank <= 3'd1;
 		else
@@ -798,7 +815,7 @@ always @(posedge clk_sys) begin
 	if(reset_ss)
 		boot_rom_enabled <= SS_Top[23]; // 1'b1;
 	else if (ce) begin 
-		if((cpu_addr == 16'hff50) && !cpu_wr_n)
+		if((cpu_addr == 16'hff50) && !cpu_wr_n_edge)
           if ((isGBC && cpu_do[7:0]==8'h11) || (!isGBC && cpu_do[0]))
 		          boot_rom_enabled <= 1'b0;
 	end
@@ -824,7 +841,7 @@ assign is_hdma_cart_addr = (hdma_sel_rom || hdma_sel_cram); //rom or external ra
 assign cart_di = cpu_do;
 assign cart_addr = (isGBC&&hdma_rd&&is_hdma_cart_addr)?hdma_source_addr:(dma_rd&&is_dma_cart_addr)?dma_addr:cpu_addr;
 assign cart_rd = (isGBC&&hdma_rd&&is_hdma_cart_addr) || (dma_rd&&is_dma_cart_addr) || ((sel_rom || sel_cram) && !cpu_rd_n);
-assign cart_wr = (sel_rom || sel_cram) && !cpu_wr_n && !hdma_rd;
+assign cart_wr = (sel_rom || sel_cram) && !cpu_wr_n_edge && !hdma_rd;
 
 assign gbc_bios_addr = hdma_rd?hdma_source_addr[11:0]:cpu_addr[11:0];
 
@@ -879,6 +896,7 @@ gb_savestates gb_savestates (
    
    .load_done              (state_loaded),
    
+   .increaseSSHeaderCount  (increaseSSHeaderCount),
    .save                   (savestate_savestate),
    .load                   (savestate_loadstate),
    .savestate_address      (savestate_address),
@@ -913,6 +931,7 @@ gb_savestates gb_savestates (
    .bus_out_Adr            (SAVE_out_Adr),   
    .bus_out_rnw            (SAVE_out_rnw),   
    .bus_out_ena            (SAVE_out_ena),   
+   .bus_out_be             (SAVE_out_be),   
    .bus_out_done           (SAVE_out_done)  
 );
 
