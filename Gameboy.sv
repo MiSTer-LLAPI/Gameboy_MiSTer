@@ -193,7 +193,7 @@ assign AUDIO_MIX = status[8:7];
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXX XXXXXXXXXXXXXXXXXXXXXXXXX XX                            XX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXXX                          XX
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -228,6 +228,7 @@ localparam CONF_STR = {
 	"P1O5,Stabilize video(buffer),Off,On;",
 	"P1OG,Frame blend,Off,On;",
 	"d4P1OU,GBC Colors,Corrected,Raw;",
+	"P1o2,Analog width,Narrow,Wide;",
 	"P1-;",
 	"P1O78,Stereo mix,none,25%,50%,100%;",
 
@@ -239,6 +240,8 @@ localparam CONF_STR = {
 	"P2OP,FastForward Sound,On,Off;",
 	"P2OQ,Pause when OSD is open,Off,On;",
 	"P2OR,Rewind Capture,Off,On;",
+	"P2-;",
+	"P2o3,Super Game Boy + GBC,Off,On;",
 
 	"-;",
 	"R0,Reset;",
@@ -570,7 +573,8 @@ wire [9:0] mbc_bank;
 wire [7:0] ram_mask_file, cart_ram_size;
 wire isGBC_game, isSGB_game;
 wire cart_has_save;
-wire [31:0] RTC_timestampOut, RTC_savedtimeOut;
+wire [31:0] RTC_timestampOut;
+wire [47:0] RTC_savedtimeOut;
 wire RTC_inuse;
 
 cart_top cart (
@@ -651,6 +655,7 @@ end
 wire lcd_clkena;
 wire [14:0] lcd_data;
 wire [1:0] lcd_mode;
+wire [1:0] lcd_data_gb;
 wire lcd_on;
 wire lcd_vsync;
 
@@ -705,6 +710,7 @@ gb gb (
 	// interface to the lcd
 	.lcd_clkena  ( lcd_clkena ),
 	.lcd_data    ( lcd_data   ),
+	.lcd_data_gb ( lcd_data_gb ),
 	.lcd_mode    ( lcd_mode   ),
 	.lcd_on      ( lcd_on     ),
 	.lcd_vsync   ( lcd_vsync  ),
@@ -768,6 +774,7 @@ wire HBlank, VBlank;
 wire ce_pix;
 wire [8:0] h_cnt, v_cnt;
 wire [1:0] tint = status[2:1];
+wire h_end;
 
 lcd lcd
 (
@@ -787,7 +794,8 @@ lcd lcd
 	.inv    ( status[12]  ),
 	.double_buffer( status[5]),
 	.frame_blend( status[16] ),
-	.originalcolors( status[6] ),
+	.originalcolors( status[30] ),
+	.analog_wide ( status[34] ),
 
 	// Palettes
 	.pal1   (palette[127:104]),
@@ -809,7 +817,8 @@ lcd lcd
 	.b      ( B          ),
 	.ce_pix ( ce_pix     ),
 	.h_cnt  ( h_cnt      ),
-	.v_cnt  ( v_cnt      )
+	.v_cnt  ( v_cnt      ),
+	.h_end  ( h_end      )
 );
 
 wire [1:0] joy_p54;
@@ -837,17 +846,20 @@ sgb sgb (
 	.joy_p54     ( joy_p54     ),
 	.joy_do      ( joy_do_sgb  ),
 
-	.sgb_en      ( |sgb_en & isSGB_game & ~isGBC ),
+	.sgb_en      ( |sgb_en & isSGB_game & (~isGBC | status[35]) ),
 	.tint        ( tint[1]     ),
+	.isGBC_game  ( isGBC & isGBC_game ),
 
 	.lcd_on      ( lcd_on      ),
 	.lcd_clkena  ( lcd_clkena  ),
 	.lcd_data    ( lcd_data    ),
+	.lcd_data_gb ( lcd_data_gb ),
 	.lcd_mode    ( lcd_mode    ),
 	.lcd_vsync   ( lcd_vsync   ),
 
 	.h_cnt       ( h_cnt      ),
 	.v_cnt       ( v_cnt      ),
+	.h_end       ( h_end      ),
 
 	.border_download (sgb_border_download),
 	.ioctl_wr        (ioctl_wr),
@@ -1097,6 +1109,7 @@ assign sd_buff_din = (sd_lba[7:0] <= ram_mask_file) ? bk_q :  // normal saveram 
 					 (sd_buff_addr == 8'd1) ? RTC_timestampOut[31:16] :
 					 (sd_buff_addr == 8'd2) ? RTC_savedtimeOut[15:0]  :
 					 (sd_buff_addr == 8'd3) ? RTC_savedtimeOut[31:16] :
+					 (sd_buff_addr == 8'd4) ? RTC_savedtimeOut[47:32] :
 					 16'hFFFF;
 
 
