@@ -500,19 +500,45 @@ LLAPI llapi2
 // 4 = RX+   = P2 Latch
 // 5 = RX-   = P2 Data
 
-//	"J1,A,B,C,D,Start,Select,Coin,ABC;"
+// "J1,A,B,Select,Start,FastForward,Savestates,Rewind;",
 
-wire [15:0] joy_ll_a = { 8'd0,
-	llapi_buttons[5], llapi_buttons[4],
-	llapi_buttons[0], llapi_buttons[1],
-	llapi_buttons[27], llapi_buttons[26], llapi_buttons[25], llapi_buttons[24]
-};
+wire [15:0] joy_ll_a;
+always_comb begin
+	// map for saturn controller
+        // no select button so use Z
+        if (llapi_type == 3 || llapi_type == 8) begin
+		joy_ll_a = { 8'd0,
+			llapi_buttons[5], llapi_buttons[6],
+			llapi_buttons[0], llapi_buttons[1],
+			llapi_buttons[27], llapi_buttons[26], llapi_buttons[25], llapi_buttons[24]
+		};
+	end else begin
+		joy_ll_a = { 8'd0,
+                        llapi_buttons[5], llapi_buttons[4],
+                        llapi_buttons[0], llapi_buttons[1],
+                        llapi_buttons[27], llapi_buttons[26], llapi_buttons[25], llapi_buttons[24]
+                };
+	end
+end
 
-wire [15:0] joy_ll_b = { 8'd0,
-	llapi_buttons2[5], llapi_buttons2[4],
-	llapi_buttons2[0], llapi_buttons2[1],
-	llapi_buttons2[27], llapi_buttons2[26], llapi_buttons2[25], llapi_buttons2[24]
-};
+wire [15:0] joy_ll_b;
+always_comb begin
+	// map for saturn controller
+        // no select button so use Z
+        if (llapi_type2 == 3 || llapi_type2 == 8) begin
+		joy_ll_b = { 8'd0,
+			llapi_buttons2[5], llapi_buttons2[6],
+			llapi_buttons2[0], llapi_buttons2[1],
+			llapi_buttons2[27], llapi_buttons2[26], llapi_buttons2[25], llapi_buttons2[24]
+		};
+	end else begin
+		joy_ll_b = { 8'd0,
+                        llapi_buttons2[5], llapi_buttons2[4],
+                        llapi_buttons2[0], llapi_buttons2[1],
+                        llapi_buttons2[27], llapi_buttons2[26], llapi_buttons2[25], llapi_buttons2[24]
+                };
+	end
+end
 
 wire llapi_osd = (llapi_buttons[26] & llapi_buttons[5] & llapi_buttons[0]) || (llapi_buttons2[26] & llapi_buttons2[5] & llapi_buttons2[0]);
 
