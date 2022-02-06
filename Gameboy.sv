@@ -1,3 +1,4 @@
+
 //============================================================================
 //  Gameboy
 //  Copyright (c) 2015 Till Harbaum <till@harbaum.org>  
@@ -30,7 +31,7 @@ module emu
 	input         RESET,
 
 	//Must be passed to hps_io module
-	inout  [45:0] HPS_BUS,
+	inout  [48:0] HPS_BUS,
 
 	//Base video clock. Usually equals to CLK_SYS.
 	output        CLK_VIDEO,
@@ -193,7 +194,8 @@ assign AUDIO_MIX = status[8:7];
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXXX                          XX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXXXXX                        XX
+
 
 `include "build_id.v" 
 localparam CONF_STR = {
@@ -219,6 +221,8 @@ localparam CONF_STR = {
 	"P1,Audio & Video;",
 	"P1-;",
 	"P1OC,Inverted color,No,Yes;",
+	"P1o4,Screen Shadow,No,Yes;",
+	"h6P1o5,Use GBA Mode,No,Yes;",
 	"P1O12,Custom Palette,Off,Auto,On;",
 	"h1P1FC3,GBP,Load Palette;",
 	"P1-;",
@@ -352,7 +356,8 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	.joystick_1(joystick_usb1),
 	.joystick_2(joystick_usb2),
 	.joystick_3(joystick_usb3),
-	.joystick_analog_0(joystick_analog_0),
+	.joystick_l_analog_0(joystick_analog_0),
+
 	
 	.ps2_key(ps2_key),
 	
@@ -371,6 +376,7 @@ wire [22:0] mbc_addr;
 wire cart_a15;
 wire cart_rd;
 wire cart_wr;
+wire cart_oe;
 wire [7:0] cart_di, cart_do;
 wire nCS; // WRAM or Cart RAM CS
 
@@ -592,7 +598,9 @@ cart_top cart (
 	.cart_wr     ( cart_wr    ),
 	.cart_do     ( cart_do    ),
 	.cart_di     ( cart_di    ),
-   
+
+	.cart_oe     ( cart_oe    ),
+
 	.nCS         ( nCS        ),
 
 	.mbc_addr    ( mbc_addr   ),
@@ -649,8 +657,11 @@ cart_top cart (
 );
 
 reg [127:0] palette = 128'h828214517356305A5F1A3B4900000000;
+reg using_real_bios = 0;
 
 always @(posedge clk_sys) begin
+	if (bios_download)
+		using_real_bios <= 1;
 	if (palette_download & ioctl_wr) begin
 			palette[127:0] <= {palette[111:0], ioctl_dout[7:0], ioctl_dout[15:8]};
 	end
@@ -696,19 +707,21 @@ gb gb (
 	.joy_p54     (joy_p54     ),
 	.joy_din     ( joy_do_sgb  ),
 
+
 	// interface to the "external" game cartridge
-	.cart_addr   ( cart_addr  ),
-	.cart_a15    ( cart_a15   ),
+	.ext_bus_addr( cart_addr  ),
+	.ext_bus_a15 ( cart_a15   ),
 	.cart_rd     ( cart_rd    ),
 	.cart_wr     ( cart_wr    ),
 	.cart_do     ( cart_do    ),
 	.cart_di     ( cart_di    ),
-	
+	.cart_oe     ( cart_oe    ),
+
 	.nCS         ( nCS        ),
 
 	//gbc bios interface
 	.gbc_bios_addr   ( bios_addr  ),
-	.gbc_bios_do     ( bios_do    ),
+	.gbc_bios_do     ( bios_do_mod  ),
 
 	// audio
 	.audio_l 	 ( GB_AUDIO_L ),
@@ -794,6 +807,8 @@ lcd lcd
 	.mode   ( sgb_lcd_mode   ),  // used to detect begin of new lines and frames
 	.on     ( sgb_lcd_on     ),
 	.lcd_vs ( sgb_lcd_vsync  ),
+
+	.shadow ( status[36]     ),
 
 	.isGBC  ( isGBC      ),
 
@@ -1042,10 +1057,31 @@ savestate_ui savestate_ui
 );
 defparam savestate_ui.INFO_TIMEOUT_BITS = 27;
 
+
 ///////////////////////////// GBC BIOS /////////////////////////////////
 
 wire [7:0] bios_do;
 wire [11:0] bios_addr;
+wire [7:0] bios_do_gba;
+wire [7:0] bios_do_mod;
+
+always_comb begin
+	case (bios_addr)
+		12'h0F2: bios_do_gba = 8'h00;
+		12'h0F3: bios_do_gba = 8'h00;
+		12'h0F5: bios_do_gba = 8'hCD;
+		12'h0F6: bios_do_gba = 8'hD0;
+		12'h0F7: bios_do_gba = 8'h05;
+		12'h0F8: bios_do_gba = 8'hAF;
+		12'h0F9: bios_do_gba = 8'hE0;
+		12'h0FA: bios_do_gba = 8'h70;
+		12'h0FB: bios_do_gba = 8'h04;
+		12'h409: bios_do_gba = 8'h80;
+		12'h40A: bios_do_gba = 8'hFF;
+		default: bios_do_gba = bios_do;
+	endcase
+	bios_do_mod = (status[37] && using_real_bios) ? bios_do_gba : bios_do;
+end
 
 dpram_dif #(12,8,11,16,"BootROMs/cgb_boot.mif") boot_rom_gbc (
 	.clock (clk_sys),
