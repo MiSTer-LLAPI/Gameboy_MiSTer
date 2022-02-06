@@ -20,6 +20,7 @@
 //  with this program; if not, write to the Free Software Foundation, Inc.,
 //  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //============================================================================
+//LLAPI : llapi.sv needs to be in rtl folder and needs to be declared in file.qip (set_global_assignment -name SYSTEMVERILOG_FILE rtl/llapi.sv)
 
 module emu
 (
@@ -184,7 +185,9 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign LED_USER  = ioctl_download | sav_pending;
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
+//LLAPI: OSD combinaison
 assign BUTTONS   = llapi_osd;
+//LLAPI
 assign HDMI_FREEZE = 0;
 assign VGA_SCALER= 0;
 
@@ -239,7 +242,10 @@ localparam CONF_STR = {
 	"P2,Misc.;",
 	"P2-;",
 	"P2OB,Boot,Normal,Fast;",
+	//LLAPI: OSD menu item. swapped NONE with LLAPI. To detect LLAPI, status[63] = 1.
+	//LLAPI: Always double check witht the bits map allocation table to avoid conflicts	
 	"P2oUV,Serial Mode,None,Link Port,LLAPI;",
+	//LLAPI
 	"P2-;",
 	"P2OP,FastForward Sound,On,Off;",
 	"P2OQ,Pause when OSD is open,Off,On;",
@@ -298,7 +304,9 @@ wire [24:0] ioctl_addr;
 wire [15:0] ioctl_dout;
 wire        ioctl_wait;
 
-wire [15:0] joystick_usb0, joystick_usb1, joystick_usb2, joystick_usb3;
+//LLAPI: Distinguish hps_io (usb) josticks from llapi joysticks
+wire [15:0] joy_usb_0, joy_usb_1, joy_usb_2, joy_usb_3, joy_usb_4;
+//LLAPI
 wire [15:0] joystick_analog_0;
 wire [10:0] ps2_key;
 
@@ -352,10 +360,13 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	.gamma_bus(gamma_bus),
 	.forced_scandoubler(forced_scandoubler),
 
-	.joystick_0(joystick_usb0),
-	.joystick_1(joystick_usb1),
-	.joystick_2(joystick_usb2),
-	.joystick_3(joystick_usb3),
+	//LLAPI : renamed hps_io (usb) joysticks
+	.joystick_0(joy_usb_0),
+	.joystick_1(joy_usb_1),
+	.joystick_2(joy_usb_2),
+	.joystick_3(joy_usb_3),
+	.joystick_4(joy_usb_4),
+	//LLAPI
 	.joystick_l_analog_0(joystick_analog_0),
 
 	
@@ -455,15 +466,16 @@ wire llapi_select = status[63];
 
 wire llapi_latch_o, llapi_latch_o2, llapi_data_o, llapi_data_o2;
 
+//connection to USER_OUT port
 always_comb begin
 	USER_OUT = 6'b111111;
 	if (llapi_select) begin
 		USER_OUT[0] = llapi_latch_o;
 		USER_OUT[1] = llapi_data_o;
-		USER_OUT[2] = ~(llapi_select & ~OSD_STATUS);
+		USER_OUT[2] = ~(llapi_select & ~OSD_STATUS);//LED on Blister
 		USER_OUT[4] = llapi_latch_o2;
 		USER_OUT[5] = llapi_data_o2;
-	end else if (serial_ena) begin
+	end else if (serial_ena) begin //Serial RAW optiom
 		USER_OUT[1] = ser_data_out;
 		USER_OUT[0] = sc_int_clock_out?ser_clk_out:1'b1;
 	end else begin
@@ -471,6 +483,8 @@ always_comb begin
 		USER_OUT[1] = 1'b1;
 	end
 end
+
+//Port 1 conf
 
 LLAPI llapi
 (
@@ -486,6 +500,8 @@ LLAPI llapi
 	.LLAPI_TYPE(llapi_type),
 	.LLAPI_EN(llapi_en)
 );
+
+//Port 2 conf
 
 LLAPI llapi2
 (
@@ -510,6 +526,12 @@ LLAPI llapi2
 // 4 = RX+   = P2 Latch
 // 5 = RX-   = P2 Data
 
+//Controller string provided by core for reference (order is important)
+//Controller specific mapping based on type. More info here : https://docs.google.com/document/d/12XpxrmKYx_jgfEPyw-O2zex1kTQZZ-NSBdLO2RQPRzM/edit
+//llapi_Buttons id are HID id - 1
+
+//Port 1 mapping
+
 // "J1,A,B,Select,Start,FastForward,Savestates,Rewind;",
 
 wire [15:0] joy_ll_a;
@@ -531,6 +553,9 @@ always_comb begin
 	end
 end
 
+
+//Port 2 mapping
+
 wire [15:0] joy_ll_b;
 always_comb begin
 	// map for saturn controller
@@ -550,6 +575,8 @@ always_comb begin
 	end
 end
 
+//Assign (DOWN + FIRST BUTTON) Combinaison to bring the OSD up - P1 and P1 ports.
+//TODO : Support long press detection
 wire llapi_osd = (llapi_buttons[26] & llapi_buttons[5] & llapi_buttons[0]) || (llapi_buttons2[26] & llapi_buttons2[5] & llapi_buttons2[0]);
 
 wire [15:0] joystick_0, joy0_unmod, joystick_1, joystick_2, joystick_3;
@@ -558,18 +585,18 @@ always_comb begin
         if (use_llapi && use_llapi2) begin
                 joy0_unmod = joy_ll_a;
                 joystick_1 = joy_ll_b;
-                joystick_2 = joystick_usb0;
-                joystick_3 = joystick_usb1;
+                joystick_2 = joy_usb_0;
+                joystick_3 = joy_usb_1;
         end else if (use_llapi || use_llapi2) begin
-                joy0_unmod = use_llapi  ? joy_ll_a : joystick_usb0;
-                joystick_1 = use_llapi2 ? joy_ll_b : joystick_usb0;
-                joystick_2 = joystick_usb1;
-                joystick_3 = joystick_usb2;
+                joy0_unmod = use_llapi  ? joy_ll_a : joy_usb_0;
+                joystick_1 = use_llapi2 ? joy_ll_b : joy_usb_0;
+                joystick_2 = joy_usb_1;
+                joystick_3 = joy_usb_2;
         end else begin
-                joy0_unmod = joystick_usb0;
-                joystick_1 = joystick_usb1;
-                joystick_2 = joystick_usb2;
-                joystick_3 = joystick_usb3;
+                joy0_unmod = joy_usb_0;
+                joystick_1 = joy_usb_1;
+                joystick_2 = joy_usb_2;
+                joystick_3 = joy_usb_3;
         end
 end
 
