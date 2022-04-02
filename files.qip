@@ -37,3 +37,4 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mappers/rocket.sv
 set_global_assignment -name VERILOG_FILE rtl/mappers/sachen.v
 set_global_assignment -name SDC_FILE Gameboy.sdc
 set_global_assignment -name SYSTEMVERILOG_FILE Gameboy.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/llapi.sv
