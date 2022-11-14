@@ -1,4 +1,3 @@
-
 //============================================================================
 //  Gameboy
 //  Copyright (c) 2015 Till Harbaum <till@harbaum.org>  
@@ -53,15 +52,16 @@ module emu
 	output        VGA_VS,
 	output        VGA_DE,    // = ~(VBlank | HBlank)
 	output        VGA_F1,
-	output  [1:0] VGA_SL,
+	output [1:0]  VGA_SL,
 	output        VGA_SCALER, // Force VGA scaler
+	output        VGA_DISABLE, // analog out is off
 
 	input  [11:0] HDMI_WIDTH,
 	input  [11:0] HDMI_HEIGHT,
 	output        HDMI_FREEZE,
 
 `ifdef MISTER_FB
-	// Use framebuffer in DDRAM (USE_FB=1 in qsf)
+	// Use framebuffer in DDRAM
 	// FB_FORMAT:
 	//    [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
 	//    [3]   : 0=16bits 565 1=16bits 1555
@@ -172,6 +172,7 @@ module emu
 	// Set USER_OUT to 1 to read from USER_IN.
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
+
 	input         OSD_STATUS
 );
 
@@ -185,11 +186,13 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign LED_USER  = ioctl_download | sav_pending;
 assign LED_DISK  = 0;
 assign LED_POWER = 0;
+//assign BUTTONS   = 0;
 //LLAPI: OSD combinaison
 assign BUTTONS   = llapi_osd;
 //LLAPI
 assign HDMI_FREEZE = 0;
 assign VGA_SCALER= 0;
+assign VGA_DISABLE = 0;
 
 assign AUDIO_MIX = status[8:7];
 
@@ -197,14 +200,15 @@ assign AUDIO_MIX = status[8:7];
 // 0         1         2         3          4         5         6
 // 01234567890123456789012345678901 23456789012345678901234567890123
 // 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHIJKLMNOPQRSTUV
-// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXXXXX                        XX
-
+// XXXXXXXXXXX XXXXXXXXXXXXXXXXXXXX XXXXXXXXXX
 
 `include "build_id.v" 
 localparam CONF_STR = {
 	"GAMEBOY;SS3E000000:40000;",
-	"FS1,GBCGB ,Load ROM;",
-	"OEF,System,Auto,Gameboy,Gameboy Color;",
+	"FS1,GBCGB BIN,Load ROM;",
+	"OEF,System,Auto,Gameboy,Gameboy Color,MegaDuck;",
+	"D7o79,Mapper,Auto,WisdomTree,Mani161,MBC1,MBC3;",
+	"-;",
 	"ONO,Super Game Boy,Off,Palette,On;",
 	"d5FC2,SGB,Load SGB border;",
 	"-;",
@@ -241,7 +245,12 @@ localparam CONF_STR = {
 
 	"P2,Misc.;",
 	"P2-;",
-	"P2OB,Boot,Normal,Fast;",
+	"P2FC4,BIN,Load GBC Boot;",
+	"P2FC5,BIN,Load DMG Boot;",
+	"P2FC6,BIN,Load SGB Boot;",
+	"P2-;",
+	//"P2O6,Link Port,Disabled,Enabled;",
+	//"P2o6,Rumble,On,Off;",
 	//LLAPI: OSD menu item. swapped NONE with LLAPI. To detect LLAPI, status[63] = 1.
 	//LLAPI: Always double check witht the bits map allocation table to avoid conflicts	
 	"P2oUV,Serial Mode,None,Link Port,LLAPI;",
@@ -304,6 +313,7 @@ wire [24:0] ioctl_addr;
 wire [15:0] ioctl_dout;
 wire        ioctl_wait;
 
+//wire [15:0] joystick_0, joy0_unmod, joystick_1, joystick_2, joystick_3;
 //LLAPI: Distinguish hps_io (usb) josticks from llapi joysticks
 wire [15:0] joy_usb_0, joy_usb_1, joy_usb_2, joy_usb_3, joy_usb_4;
 //LLAPI
@@ -323,8 +333,13 @@ wire        sd_buff_wr;
 wire        img_mounted;
 wire        img_readonly;
 wire [63:0] img_size;
+wire [15:0] joy0_rumble;
 
 wire [32:0] RTC_time;
+
+wire        sys_auto     = (status[15:14] == 0);
+wire        sys_gbc      = (status[15:14] == 2);
+wire        sys_megaduck = (status[15:14] == 3);
 
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 (
@@ -353,13 +368,17 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({sgb_border_en,isGBC,cart_ready,sav_supported,|tint,gg_available}),
+	.status_menumask({sys_megaduck,using_real_cgb_bios,sgb_border_en,isGBC,cart_ready,sav_supported,|tint,gg_available}),
 	.status_in({status[63:34],ss_slot,status[31:0]}),
 	.status_set(statusUpdate),
 	.direct_video(direct_video),
 	.gamma_bus(gamma_bus),
 	.forced_scandoubler(forced_scandoubler),
 
+	//.joystick_0(joy0_unmod),
+	//.joystick_1(joystick_1),
+	//.joystick_2(joystick_2),
+	//.joystick_3(joystick_3),
 	//LLAPI : renamed hps_io (usb) joysticks
 	.joystick_0(joy_usb_0),
 	.joystick_1(joy_usb_1),
@@ -369,6 +388,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	//LLAPI
 	.joystick_l_analog_0(joystick_analog_0),
 
+	.joystick_0_rumble(joy0_rumble),
 	
 	.ps2_key(ps2_key),
 	
@@ -391,10 +411,15 @@ wire cart_oe;
 wire [7:0] cart_di, cart_do;
 wire nCS; // WRAM or Cart RAM CS
 
-wire cart_download = ioctl_download && (filetype == 8'h01 || filetype == 8'h41 || filetype == 8'h80);
+wire cart_download = ioctl_download && (filetype[5:0] == 6'h01 || filetype == 8'h80);
+wire md_download = ioctl_download && (filetype == 8'h81);
 wire palette_download = ioctl_download && (filetype == 3 /*|| !filetype*/);
-wire bios_download = ioctl_download && (filetype == 8'h40);
 wire sgb_border_download = ioctl_download && (filetype == 2);
+wire cgb_boot_download = ioctl_download && (filetype == 4);
+wire dmg_boot_download = ioctl_download && (filetype == 5);
+wire sgb_boot_download = ioctl_download && (filetype == 6);
+wire boot_download = cgb_boot_download | dmg_boot_download | sgb_boot_download;
+
 
 wire  [1:0] sdram_ds = cart_download ? 2'b11 : {mbc_addr[0], ~mbc_addr[0]};
 wire [15:0] sdram_do;
@@ -600,6 +625,9 @@ always_comb begin
         end
 end
 
+
+//////////////////  END LLAPI  ///////////////////
+
 wire dn_write;
 wire cart_ready;
 wire cram_rd, cram_wr;
@@ -610,6 +638,17 @@ wire cart_has_save;
 wire [31:0] RTC_timestampOut;
 wire [47:0] RTC_savedtimeOut;
 wire RTC_inuse;
+wire rumbling;
+wire [2:0] mapper_sel = status[41:39];
+
+assign joy0_rumble = {8'd0, ((rumbling & ~status[38]) ? 8'd128 : 8'd0)};
+
+reg ce_32k; // 32768Hz clock for RTC
+reg [9:0] ce_32k_div;
+always @(posedge clk_sys) begin
+	ce_32k_div <= ce_32k_div + 1'b1;
+	ce_32k <= !ce_32k_div;
+end
 
 cart_top cart (
 	.reset	     ( reset      ),
@@ -618,6 +657,8 @@ cart_top cart (
 	.ce_cpu      ( ce_cpu     ),
 	.ce_cpu2x    ( ce_cpu2x   ),
 	.speed       ( speed      ),
+	.megaduck    ( megaduck   ),
+	.mapper_sel  ( mapper_sel ),
 
 	.cart_addr   ( cart_addr  ),
 	.cart_a15    ( cart_a15   ),
@@ -625,7 +666,6 @@ cart_top cart (
 	.cart_wr     ( cart_wr    ),
 	.cart_do     ( cart_do    ),
 	.cart_di     ( cart_di    ),
-
 	.cart_oe     ( cart_oe    ),
 
 	.nCS         ( nCS        ),
@@ -659,11 +699,12 @@ cart_top cart (
 	.bk_data        ( bk_data        ),
 	.bk_q           ( bk_q           ),
 	.img_size       ( img_size       ),
-		
+
 	.rom_di         ( rom_do       ),
 
 	.joystick_analog_0 ( joystick_analog_0 ),
-		
+
+	.ce_32k           ( ce_32k           ),
 	.RTC_time         ( RTC_time         ),
 	.RTC_timestampOut ( RTC_timestampOut ),
 	.RTC_savedtimeOut ( RTC_savedtimeOut ),
@@ -680,15 +721,17 @@ cart_top cart (
 	.Savestate_CRAMAddr     ( Savestate_CRAMAddr      ),
 	.Savestate_CRAMRWrEn    ( Savestate_CRAMRWrEn     ),
 	.Savestate_CRAMWriteData( Savestate_CRAMWriteData ),
-	.Savestate_CRAMReadData ( Savestate_CRAMReadData  )
+	.Savestate_CRAMReadData ( Savestate_CRAMReadData  ),
+	
+	.rumbling (rumbling)
 );
 
 reg [127:0] palette = 128'h828214517356305A5F1A3B4900000000;
-reg using_real_bios = 0;
+reg using_real_cgb_bios = 0;
 
 always @(posedge clk_sys) begin
-	if (bios_download)
-		using_real_bios <= 1;
+	if (cgb_boot_download)
+		using_real_cgb_bios <= 1;
 	if (palette_download & ioctl_wr) begin
 			palette[127:0] <= {palette[111:0], ioctl_dout[7:0], ioctl_dout[15:8]};
 	end
@@ -705,13 +748,22 @@ wire DMA_on;
 
 assign AUDIO_S = 0;
 
-wire reset = (RESET | status[0] | buttons[1] | cart_download | bk_loading);
+wire reset = (RESET | status[0] | buttons[1] | cart_download | boot_download | bk_loading);
 wire speed;
+reg megaduck = 0;
 
 reg isGBC = 0;
 always @(posedge clk_sys) if(reset) begin
-	if(status[15:14]) isGBC <= status[15];
-	else if(cart_download) isGBC <= !filetype[7:4];
+	if (cart_download)
+		megaduck <= sys_megaduck;
+	if (md_download)
+		megaduck <= sys_auto || sys_megaduck;
+
+	if(~sys_auto) isGBC <= sys_gbc;
+	else if(cart_download) begin
+		if (!filetype[5:0]) isGBC <= isGBC_game;
+		else isGBC <= !filetype[7:6];
+	end
 end
 
 wire [15:0] GB_AUDIO_L;
@@ -725,15 +777,13 @@ gb gb (
 	.ce          ( ce_cpu     ),   // the whole gameboy runs on 4mhnz
 	.ce_2x       ( ce_cpu2x   ),   // ~8MHz in dualspeed mode (GBC)
 	
-	.fast_boot   ( status[11]  ),
-
 	.isGBC       ( isGBC      ),
 	.isGBC_game  ( isGBC_game ),
 	.isSGB       ( |sgb_en & ~isGBC ),
+	.megaduck    ( megaduck   ),
 
-	.joy_p54     (joy_p54     ),
+	.joy_p54     ( joy_p54     ),
 	.joy_din     ( joy_do_sgb  ),
-
 
 	// interface to the "external" game cartridge
 	.ext_bus_addr( cart_addr  ),
@@ -746,9 +796,14 @@ gb gb (
 
 	.nCS         ( nCS        ),
 
-	//gbc bios interface
-	.gbc_bios_addr   ( bios_addr  ),
-	.gbc_bios_do     ( bios_do_mod  ),
+	.boot_gba_en    ( status[37] && using_real_cgb_bios ),
+
+	.cgb_boot_download ( cgb_boot_download ),
+	.dmg_boot_download ( dmg_boot_download ),
+	.sgb_boot_download ( sgb_boot_download ),
+	.ioctl_wr       ( ioctl_wr       ),
+	.ioctl_addr     ( ioctl_addr     ),
+	.ioctl_dout     ( ioctl_dout     ),
 
 	// audio
 	.audio_l 	 ( GB_AUDIO_L ),
@@ -788,14 +843,14 @@ gb gb (
 	.sleep_savestate (sleep_savestate),
 	
 	.SaveStateExt_Din (SaveStateBus_Din),
-	.SaveStateExt_Adr (SaveStateBus_Adr), 
+	.SaveStateExt_Adr (SaveStateBus_Adr),
 	.SaveStateExt_wren(SaveStateBus_wren),
 	.SaveStateExt_rst (SaveStateBus_rst),
 	.SaveStateExt_Dout(SaveStateBus_Dout),
 	.SaveStateExt_load(savestate_load),
 	
-	.Savestate_CRAMAddr     (Savestate_CRAMAddr),     
-	.Savestate_CRAMRWrEn    (Savestate_CRAMRWrEn),   
+	.Savestate_CRAMAddr     (Savestate_CRAMAddr),
+	.Savestate_CRAMRWrEn    (Savestate_CRAMRWrEn),
 	.Savestate_CRAMWriteData(Savestate_CRAMWriteData),
 	.Savestate_CRAMReadData (Savestate_CRAMReadData),
 	
@@ -834,7 +889,6 @@ lcd lcd
 	.mode   ( sgb_lcd_mode   ),  // used to detect begin of new lines and frames
 	.on     ( sgb_lcd_on     ),
 	.lcd_vs ( sgb_lcd_vsync  ),
-
 	.shadow ( status[36]     ),
 
 	.isGBC  ( isGBC      ),
@@ -1084,43 +1138,6 @@ savestate_ui savestate_ui
 );
 defparam savestate_ui.INFO_TIMEOUT_BITS = 27;
 
-
-///////////////////////////// GBC BIOS /////////////////////////////////
-
-wire [7:0] bios_do;
-wire [11:0] bios_addr;
-wire [7:0] bios_do_gba;
-wire [7:0] bios_do_mod;
-
-always_comb begin
-	case (bios_addr)
-		12'h0F2: bios_do_gba = 8'h00;
-		12'h0F3: bios_do_gba = 8'h00;
-		12'h0F5: bios_do_gba = 8'hCD;
-		12'h0F6: bios_do_gba = 8'hD0;
-		12'h0F7: bios_do_gba = 8'h05;
-		12'h0F8: bios_do_gba = 8'hAF;
-		12'h0F9: bios_do_gba = 8'hE0;
-		12'h0FA: bios_do_gba = 8'h70;
-		12'h0FB: bios_do_gba = 8'h04;
-		12'h409: bios_do_gba = 8'h80;
-		12'h40A: bios_do_gba = 8'hFF;
-		default: bios_do_gba = bios_do;
-	endcase
-	bios_do_mod = (status[37] && using_real_bios) ? bios_do_gba : bios_do;
-end
-
-dpram_dif #(12,8,11,16,"BootROMs/cgb_boot.mif") boot_rom_gbc (
-	.clock (clk_sys),
-	
-	.address_a (bios_addr),
-	.q_a (bios_do),
-	
-	.address_b (ioctl_addr[11:1]),
-	.wren_b (ioctl_wr && bios_download),
-	.data_b (ioctl_dout)
-);
-
 ///////////////////////////// CHEATS //////////////////////////////////
 // Code loading for WIDE IO (16 bit)
 reg [128:0] gg_code;
@@ -1155,16 +1172,29 @@ end
 
 /////////////////////////////  Serial link  ///////////////////////////////
 
+//LLAPI
+//assign USER_OUT[2] = 1'b1;
+//assign USER_OUT[3] = 1'b1;
+//assign USER_OUT[4] = 1'b1;
+//assign USER_OUT[5] = 1'b1;
+//assign USER_OUT[6] = 1'b1;
+//
+
 wire sc_int_clock_out;
 wire ser_data_in;
 wire ser_data_out;
 wire ser_clk_in;
 wire ser_clk_out;
-wire serial_ena = status[62];
+wire serial_ena = status[6];
 
 assign ser_data_in = serial_ena ? USER_IN[2] : 1'b1;
-
+//LLAPI
+//assign USER_OUT[1] = serial_ena ? ser_data_out : 1'b1;
+//
 assign ser_clk_in = serial_ena ? USER_IN[0] : 1'b1;
+//LLAPI
+//assign USER_OUT[0] = (serial_ena & sc_int_clock_out) ? ser_clk_out : 1'b1;
+//
 
 
 /////////////////////////  BRAM SAVE/LOAD  /////////////////////////////
