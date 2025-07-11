@@ -63,6 +63,8 @@ module emu
 	input  [11:0] HDMI_WIDTH,
 	input  [11:0] HDMI_HEIGHT,
 	output        HDMI_FREEZE,
+	output        HDMI_BLACKOUT,
+	output        HDMI_BOB_DEINT,
 
 `ifdef MISTER_FB
 	// Use framebuffer in DDRAM
@@ -197,6 +199,8 @@ assign BUTTONS   = llapi_osd;
 assign HDMI_FREEZE = 0;
 assign VGA_SCALER= 0;
 assign VGA_DISABLE = 0;
+assign HDMI_BLACKOUT = 0;
+assign HDMI_BOB_DEINT = 0;
 
 assign AUDIO_MIX = status[8:7];
 
@@ -242,17 +246,18 @@ localparam CONF_STR = {
 
 	"P1,Audio & Video;",
 	"P1-;",
+	"P1O[44],Extra sprites,No,Yes;",
 	"P1OC,Inverted color,No,Yes;",
 	"P1o4,Screen Shadow,No,Yes;",
 	"P1O12,Custom Palette,Off,Auto,On;",
 	"h1P1FC3,GBP,Load Palette;",
+	"P1OG,Frame blend,Off,On;",
+	"d4P1OU,GBC Colors,Corrected,Raw;",
+	"P1O5,Stabilize video(buffer),Off,On;",
 	"P1-;",
 	"P1O34,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1OLM,Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
 	"P1OIK,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
-	"P1O5,Stabilize video(buffer),Off,On;",
-	"P1OG,Frame blend,Off,On;",
-	"d4P1OU,GBC Colors,Corrected,Raw;",
 	"P1o2,Analog width,Narrow,Wide;",
 	"P1-;",
 	"P1O78,Stereo mix,none,25%,50%,100%;",
@@ -797,12 +802,14 @@ gb gb (
 	
 	.clk_sys     ( clk_sys    ),
 	.ce          ( ce_cpu     ),   // the whole gameboy runs on 4mhnz
+	.ce_n        ( ce_cpu_n   ),   // 4MHz falling edge clock enable
 	.ce_2x       ( ce_cpu2x   ),   // ~8MHz in dualspeed mode (GBC)
 	
 	.isGBC       ( isGBC      ),
     .real_cgb_boot ( using_real_cgb_bios ),  
 	.isSGB       ( |sgb_en & ~isGBC ),
 	.megaduck    ( megaduck   ),
+	.extra_spr_en( status[44] ),
 
 	.joy_p54     ( joy_p54     ),
 	.joy_din     ( joy_do_sgb  ),
@@ -1043,7 +1050,7 @@ video_freak video_freak
 //////////////////////////////// CE ////////////////////////////////////
 
 
-wire ce_cpu, ce_cpu2x;
+wire ce_cpu, ce_cpu_n, ce_cpu2x;
 wire cart_act = cart_wr | cart_rd;
 
 wire fastforward = joystick_0[8] && !ioctl_download && !OSD_STATUS;
@@ -1064,6 +1071,7 @@ speedcontrol speedcontrol
 	.cart_act    (cart_act),
 	.DMA_on      (DMA_on),
 	.ce          (ce_cpu),
+	.ce_n        (ce_cpu_n),
 	.ce_2x       (ce_cpu2x),
 	.refresh     (sdram_refresh_force),
 	.ff_on       (ff_on)

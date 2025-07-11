@@ -23,6 +23,7 @@ module video (
 	input  reset,
 	input  clk,
 	input  ce, // 4 Mhz cpu clock
+	input  ce_n, // falling edge
 	input  ce_cpu, // 4 or 8Mhz
 	input  isGBC,
 	input  isGBC_mode,
@@ -63,6 +64,9 @@ module video (
 	output dma_rd,
 	output [15:0] dma_addr,
 	input [7:0] dma_data,
+
+	input extra_spr_en,
+	input extra_wait,
 
 	// savestates
 	input [7:0] Savestate_OAMRAMAddr,     
@@ -205,6 +209,8 @@ reg[7:0] obpd [63:0]; //64 bytes
 // https://forums.nesdev.org/viewtopic.php?t=19888
 reg ff6c_opri;
 reg obj_prio_dmg_mode;
+
+integer i;
 
 // --------------------------------------------------------------------
 // ----------------------------- DMA engine ---------------------------
@@ -370,7 +376,7 @@ assign mode =
 	mode3_l & ~mode3_end ? 2'b11 :
 	                       2'b00;
 
-assign oam_cpu_allow = ~(oam_eval | mode3);
+assign oam_cpu_allow = ~(oam_eval | mode3 | dma_active);
 assign vram_cpu_allow = ~mode3;
 
 // --------------------------------------------------------------------
@@ -829,21 +835,24 @@ wire [2:0] spr_cgb_pal = sprite_attr[2:0];
 wire [7:0] spr_vram_data = (isGBC & isGBC_mode & spr_attr_cgb_bank) ? vram1_data : vram_data;
 wire [7:0] spr_tile_data_in = spr_attr_h_flip ? bit_reverse(spr_vram_data) : spr_vram_data;
 
-// CGB sprite priority. Non-transparent pixels with lower sprite_index have priority.
-function [7:0] spr_cgb_prio;
-	input [7:0] a3,a2,a1,a0;
-	integer i;
-	begin
-		for (i=0;i<8;i=i+1)
-			spr_cgb_prio[i] = (sprite_index < {a3[i], a2[i], a1[i], a0[i]}) & (spr_tile_data_in[i] | spr_tile_data0[i]);
-	end
-endfunction
-
-wire [7:0] spr_cgb_index_prio = spr_cgb_prio(spr_cgb_index_shift[3], spr_cgb_index_shift[2], spr_cgb_index_shift[1], spr_cgb_index_shift[0]);
-
 // DMG sprite pixels are only loaded into the shift register if the old pixel is transparent.
-// CGB will mask the old pixel to 0 if the new pixel has higher priority.
-wire [7:0] spr_tile_mask = (spr_tile_shift_0 | spr_tile_shift_1) & ((isGBC & ~obj_prio_dmg_mode) ? ~spr_cgb_index_prio : 8'hFF);
+wire [7:0] spr_pixel_empty = ~(spr_tile_shift_0 | spr_tile_shift_1);
+
+// CGB sprite priority. Non-transparent pixels with lower sprite_index have priority.
+reg [7:0] spr_cgb_higher_prio, spr_extra_cgb_higher_prio;
+always @(*) begin
+	for (i = 0; i < 8; i = i + 1) begin
+		spr_cgb_higher_prio[i] = (sprite_index < {spr_cgb_index_shift[3][i], spr_cgb_index_shift[2][i], spr_cgb_index_shift[1][i], spr_cgb_index_shift[0][i]}) & (spr_tile_data_in[i] | spr_tile_data0[i]);
+		spr_extra_cgb_higher_prio[i] = (spr_extra_index < {spr_cgb_index_shift[3][i], spr_cgb_index_shift[2][i], spr_cgb_index_shift[1][i], spr_cgb_index_shift[0][i]}) & (spr_extra_tile[0][i] | spr_extra_tile[1][i]);
+	end
+end
+
+wire [7:0] spr_extra_tile[0:1];
+wire [2:0] spr_extra_cgb_pal;
+wire [3:0] spr_extra_index;
+wire spr_extra_pal;
+wire spr_extra_prio;
+wire spr_extra_found;
 
 // cycle through the B01s states
 wire bg_tile_map_rd = (mode3 && bg_fetch_cycle[2:1] == 2'b00);
@@ -877,40 +886,6 @@ always @(posedge clk) begin
 
 			if(bg_tile_data0_rd) bg_tile_data0 <= bg_vram_data_in;
 			if(bg_tile_data1_rd) bg_tile_data1 <= bg_vram_data_in;
-		end
-
-		// Shift sprite data out
-		if (~pcnt_paused) begin
-			spr_tile_shift_0       <=  spr_tile_shift_0       << 1;
-			spr_tile_shift_1       <=  spr_tile_shift_1       << 1;
-			spr_pal_shift          <=  spr_pal_shift          << 1;
-			spr_prio_shift         <=  spr_prio_shift         << 1;
-			spr_cgb_pal_shift[0]   <=  spr_cgb_pal_shift[0]   << 1;
-			spr_cgb_pal_shift[1]   <=  spr_cgb_pal_shift[1]   << 1;
-			spr_cgb_pal_shift[2]   <=  spr_cgb_pal_shift[2]   << 1;
-			spr_cgb_index_shift[0] <=  spr_cgb_index_shift[0] << 1;
-			spr_cgb_index_shift[1] <=  spr_cgb_index_shift[1] << 1;
-			spr_cgb_index_shift[2] <=  spr_cgb_index_shift[2] << 1;
-			spr_cgb_index_shift[3] <=  spr_cgb_index_shift[3] << 1;
-		end
-
-		// Fetch sprite new data
-		if (sprite_fetch_cycle[0]) begin
-			if(bg_tile_obj0_rd) spr_tile_data0 <= spr_tile_data_in;
-
-			if(bg_tile_obj1_rd) begin
-				spr_tile_shift_0       <= (spr_tile_shift_0       & spr_tile_mask) | ( spr_tile_data0      & ~spr_tile_mask);
-				spr_tile_shift_1       <= (spr_tile_shift_1       & spr_tile_mask) | ( spr_tile_data_in    & ~spr_tile_mask);
-				spr_pal_shift          <= (spr_pal_shift          & spr_tile_mask) | ({8{spr_pal}}         & ~spr_tile_mask);
-				spr_prio_shift         <= (spr_prio_shift         & spr_tile_mask) | ({8{spr_prio}}        & ~spr_tile_mask);
-				spr_cgb_pal_shift[0]   <= (spr_cgb_pal_shift[0]   & spr_tile_mask) | ({8{spr_cgb_pal[0]}}  & ~spr_tile_mask);
-				spr_cgb_pal_shift[1]   <= (spr_cgb_pal_shift[1]   & spr_tile_mask) | ({8{spr_cgb_pal[1]}}  & ~spr_tile_mask);
-				spr_cgb_pal_shift[2]   <= (spr_cgb_pal_shift[2]   & spr_tile_mask) | ({8{spr_cgb_pal[2]}}  & ~spr_tile_mask);
-				spr_cgb_index_shift[0] <= (spr_cgb_index_shift[0] & spr_tile_mask) | ({8{sprite_index[0]}} & ~spr_tile_mask);
-				spr_cgb_index_shift[1] <= (spr_cgb_index_shift[1] & spr_tile_mask) | ({8{sprite_index[1]}} & ~spr_tile_mask);
-				spr_cgb_index_shift[2] <= (spr_cgb_index_shift[2] & spr_tile_mask) | ({8{sprite_index[2]}} & ~spr_tile_mask);
-				spr_cgb_index_shift[3] <= (spr_cgb_index_shift[3] & spr_tile_mask) | ({8{sprite_index[3]}} & ~spr_tile_mask);
-			end
 		end
 
 		if (~&bg_fetch_cycle) begin
@@ -966,8 +941,77 @@ always @(posedge clk) begin
 
 end
 
+always @(posedge clk) begin
+	if (reset) begin
+
+	end else begin
+
+		if (ce) begin
+			// Shift sprite data out
+			if (~pcnt_paused) begin
+				spr_tile_shift_0       <=  spr_tile_shift_0       << 1;
+				spr_tile_shift_1       <=  spr_tile_shift_1       << 1;
+				spr_pal_shift          <=  spr_pal_shift          << 1;
+				spr_prio_shift         <=  spr_prio_shift         << 1;
+				spr_cgb_pal_shift[0]   <=  spr_cgb_pal_shift[0]   << 1;
+				spr_cgb_pal_shift[1]   <=  spr_cgb_pal_shift[1]   << 1;
+				spr_cgb_pal_shift[2]   <=  spr_cgb_pal_shift[2]   << 1;
+				spr_cgb_index_shift[0] <=  spr_cgb_index_shift[0] << 1;
+				spr_cgb_index_shift[1] <=  spr_cgb_index_shift[1] << 1;
+				spr_cgb_index_shift[2] <=  spr_cgb_index_shift[2] << 1;
+				spr_cgb_index_shift[3] <=  spr_cgb_index_shift[3] << 1;
+			end
+
+			// Fetch sprite new data
+			if (sprite_fetch_cycle[0]) begin
+				if(bg_tile_obj0_rd) spr_tile_data0 <= spr_tile_data_in;
+
+				if(bg_tile_obj1_rd) begin
+					for (i = 0; i < 8; i = i + 1) begin
+						if (spr_pixel_empty[i] | (isGBC & ~obj_prio_dmg_mode & spr_cgb_higher_prio[i])) begin
+							spr_tile_shift_0[i]       <= spr_tile_data0[i];
+							spr_tile_shift_1[i]       <= spr_tile_data_in[i];
+							spr_pal_shift[i]          <= spr_pal;
+							spr_prio_shift[i]         <= spr_prio;
+							spr_cgb_pal_shift[0][i]   <= spr_cgb_pal[0];
+							spr_cgb_pal_shift[1][i]   <= spr_cgb_pal[1];
+							spr_cgb_pal_shift[2][i]   <= spr_cgb_pal[2];
+							spr_cgb_index_shift[0][i] <= sprite_index[0];
+							spr_cgb_index_shift[1][i] <= sprite_index[1];
+							spr_cgb_index_shift[2][i] <= sprite_index[2];
+							spr_cgb_index_shift[3][i] <= sprite_index[3];
+						end
+					end
+				end
+			end
+		end
+
+		// Load extra sprite
+		if (ce_n) begin
+			if (~pcnt_paused & spr_extra_found) begin
+				for (i = 0; i < 8; i = i + 1) begin
+					if (spr_pixel_empty[i] | (isGBC & ~obj_prio_dmg_mode & spr_extra_cgb_higher_prio[i])) begin
+						spr_tile_shift_0[i]       <= spr_extra_tile[0][i];
+						spr_tile_shift_1[i]       <= spr_extra_tile[1][i];
+						spr_pal_shift[i]          <= spr_extra_pal;
+						spr_prio_shift[i]         <= spr_extra_prio;
+						spr_cgb_pal_shift[0][i]   <= spr_extra_cgb_pal[0];
+						spr_cgb_pal_shift[1][i]   <= spr_extra_cgb_pal[1];
+						spr_cgb_pal_shift[2][i]   <= spr_extra_cgb_pal[2];
+						spr_cgb_index_shift[0][i] <= spr_extra_index[0];
+						spr_cgb_index_shift[1][i] <= spr_extra_index[1];
+						spr_cgb_index_shift[2][i] <= spr_extra_index[2];
+						spr_cgb_index_shift[3][i] <= spr_extra_index[3];
+					end
+				end
+			end
+		end
+	end
+end
+
 assign vram_rd = lcdc_on && (bg_tile_map_rd || bg_tile_data0_rd ||
-										bg_tile_data1_rd || bg_tile_obj0_rd || bg_tile_obj1_rd);
+								bg_tile_data1_rd || bg_tile_obj0_rd ||
+								bg_tile_obj1_rd || tile_obj_extra_rd);
 
 wire bg_tile_a12 = !lcdc_tile_data_sel?(~bg_tile[7]):1'b0;
 
@@ -976,12 +1020,16 @@ wire tile_map_sel = window_ena?lcdc_win_tile_map_sel:lcdc_bg_tile_map_sel;
 //GBC: check if flipped y
 wire [2:0] tile_line_flip = (isGBC && isGBC_mode && bg_tile_attr_new[6]) ? ~tile_line : tile_line;
 
+wire tile_obj_extra_rd;
+wire [11:0] sprite_extra_addr;
+
 assign vram_addr =
 	bg_tile_map_rd?{2'b11, tile_map_sel, bg_tile_map_addr}:
 	bg_tile_data0_rd?{bg_tile_a12, bg_tile, tile_line_flip, 1'b0}:
 	bg_tile_data1_rd?{bg_tile_a12, bg_tile, tile_line_flip, 1'b1}:
 	bg_tile_obj0_rd ? {1'b0, sprite_addr, 1'b0} :
-		{1'b0, sprite_addr, 1'b1};
+	bg_tile_obj1_rd ? {1'b0, sprite_addr, 1'b1} :
+		{1'b0, sprite_extra_addr };
 
 sprites sprites (
 	.clk      ( clk          ),
@@ -1004,6 +1052,7 @@ sprites sprites (
 	.sprite_addr ( sprite_addr                 ),
 	.sprite_attr ( sprite_attr ),
 	.sprite_index ( sprite_index ),
+	.sprite_fetch_c1   ( sprite_fetch_cycle == 3'd1 ),
 	.sprite_fetch_done ( sprite_fetch_done) ,
 
 	.dma_active ( dma_active),
@@ -1011,6 +1060,21 @@ sprites sprites (
 	.oam_addr_in( oam_addr     ),
 	.oam_di     ( oam_di       ),
 	.oam_do     ( oam_do       ),
+
+	// For extra sprites
+	.extra_spr_en     ( extra_spr_en ),
+	.extra_wait       ( extra_wait   ),
+	.tile_data_in     ( spr_tile_data_in ),
+	.extra_tile_fetch ( tile_obj_extra_rd ),
+	.extra_tile_addr  ( sprite_extra_addr ),
+
+	.spr_extra_found  ( spr_extra_found ),
+	.spr_extra_tile0  ( spr_extra_tile[0] ),
+	.spr_extra_tile1  ( spr_extra_tile[1] ),
+	.spr_extra_pal    ( spr_extra_pal ),
+	.spr_extra_prio   ( spr_extra_prio ),
+	.spr_extra_cgb_pal( spr_extra_cgb_pal ),
+	.spr_extra_index  ( spr_extra_index ),
 
 	.Savestate_OAMRAMAddr      (Savestate_OAMRAMAddr),     
 	.Savestate_OAMRAMRWrEn     (Savestate_OAMRAMRWrEn),    
